@@ -96,7 +96,6 @@ impl ObjectSprites {
 
 const OBJECT_PICKUPS: &[Item] = &[
     Item::Mango,
-    Item::Coconut,
     Item::GrayFish,
     Item::Stone,
     Item::Vine,
@@ -134,6 +133,7 @@ const OBJECT_PICKUPS: &[Item] = &[
     Item::Starfish,
     Item::SeaUrchin,
     Item::Egg,
+    Item::Knife,
 ];
 
 pub const STRUCTURE_ITEMS: &[Item] = &[
@@ -370,6 +370,22 @@ pub fn definition(key: &str) -> Option<ObjectDefinition> {
         });
     }
 
+    if key == "dropped_coconut" {
+        let palette = OBJECT_SPRITE_PALETTE[Item::Coconut.j2me_index()];
+        let sprite = (palette >= 0)
+            .then(|| SpriteId::new((palette >> 16) as u32, (palette & 0xFFFF) as u32));
+        return Some(ObjectDefinition {
+            key: "dropped_coconut",
+            label: Item::Coconut.label(),
+            sprite,
+            anchor: (0.5, 0.5),
+            blocking: false,
+            interaction: Interaction::Pickup(Item::Coconut, 1),
+            render_layer: RenderLayer::Object,
+            composite: None,
+        });
+    }
+
     if let Some((candidate, item)) = OBJECT_ITEM_KEYS
         .iter()
         .find(|(candidate, _)| *candidate == key)
@@ -377,19 +393,29 @@ pub fn definition(key: &str) -> Option<ObjectDefinition> {
         let palette = OBJECT_SPRITE_PALETTE[item.j2me_index()];
         let sprite = (palette >= 0)
             .then(|| SpriteId::new((palette >> 16) as u32, (palette & 0xFFFF) as u32));
-        let interaction = if let Some(kind) = structure_use(*item) {
+        let interaction = if *item == Item::Coconut {
+            Interaction::None
+        } else if let Some(kind) = structure_use(*item) {
             Interaction::Structure(kind)
         } else if OBJECT_PICKUPS.contains(item) {
             Interaction::Pickup(*item, 1)
         } else {
             Interaction::None
         };
+        let is_canopy_coconut = *item == Item::Coconut;
         return Some(ObjectDefinition {
             key: candidate,
             label: item.label(),
             sprite,
-            anchor: (0.5, 0.5),
-            blocking: true,
+            anchor: if is_canopy_coconut {
+                // The palm composites climb 60-100 px above their root tile.
+                // Tree coconuts are canopy markers, not ground items, so draw
+                // this small 14x11 sprite up in the foliage.
+                (0.5, 6.3)
+            } else {
+                (0.5, 0.5)
+            },
+            blocking: !is_canopy_coconut,
             interaction,
             render_layer: RenderLayer::Object,
             composite: None,

@@ -12,11 +12,13 @@ cargo run --release
 
 **Controls:**
 - **WASD** / arrows: walk in 4 directions
-- **Space** / Enter: chop trees, gather rocks, pick things up (the white
-  corner brackets in front of you show what Space will affect)
+- **Space**: pick up the object or debris in front of you
+- **E**: examine the tile in front of you
+- **F**: open creations; constructions are available from the inventory tabs
+- **Enter**: open the available-action menu for tools, storage, repair, and minigames
 - **Escape**: pause
 
-Walk up to a palm tree, press Space, get a coconut. Chop bushes for
+Walk up to debris, press Space, and collect it. Use Enter for tool actions.
 branches. Break rocks for stone. Animals wander around the island —
 sharks in the water, deer and monkeys on land. The world has a day/night
 cycle that runs ~4 minutes per full day.
@@ -36,7 +38,7 @@ shipwrecked-rs/
 │   └── decode_d0.py
 └── src/
     ├── main.rs                  ← entry point, game loop, HUD
-    ├── actions.rs               ← Space-key interaction logic
+    ├── actions.rs               ← facing-tile action discovery and pickup logic
     ├── atlas.rs                 ← sprite sheet loader + draw helper
     ├── daynight.rs              ← day/night cycle and tint overlay
     ├── display.rs               ← viewport + render target + upscale
@@ -108,8 +110,8 @@ frame — cheap, and looks great with the pixel art underneath.
 
 Pressing **Space** triggers `actions::try_action`, which:
 1. Looks at the tile in front of the player (`player.facing_tile()`)
-2. If there's a rock there, removes it and grants Stone
-3. If there's a static object (tree, bush), removes it and grants the drop
+2. If there's a consumable object or pickup debris there, removes it
+3. Grants the corresponding item to inventory
 
 Drops by category in `actions::drops_for`:
 - Palm trees → Coconut

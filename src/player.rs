@@ -16,7 +16,7 @@ use crate::input::{Action, ActionState};
 use crate::world::World;
 use macroquad::prelude::*;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Facing {
     North,
     South,
@@ -37,6 +37,32 @@ impl Facing {
 }
 
 use crate::inventory::Item;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct PlayerStats {
+    pub hunger: f32,
+    pub thirst: f32,
+    pub energy: f32,
+    pub strength: f32,
+    pub morale: f32,
+    pub health: f32,
+    pub carried_weight: f32,
+}
+
+impl Default for PlayerStats {
+    fn default() -> Self {
+        Self {
+            hunger: 100.0,
+            thirst: 100.0,
+            energy: 100.0,
+            strength: 100.0,
+            morale: 75.0,
+            health: 100.0,
+            carried_weight: 0.0,
+        }
+    }
+}
 
 pub struct Player {
     /// Position in tile coordinates (fractional). Center of a tile is +0.5.
@@ -47,10 +73,7 @@ pub struct Player {
     /// 0.0..1.0 — walk cycle phase. 0 = idle pose.
     walk_phase: f32,
     moving: bool,
-    // Stats:
-    pub hunger: f32,
-    pub hydration: f32,
-    pub health: f32,
+    pub stats: PlayerStats,
     pub is_sleeping: bool,
     pub died_of_poison: bool,
     pub died_in_tide: bool,
@@ -70,9 +93,7 @@ impl Player {
             speed: 4.5,
             walk_phase: 0.0,
             moving: false,
-            hunger: 100.0,
-            hydration: 100.0,
-            health: 100.0,
+            stats: PlayerStats::default(),
             is_sleeping: false,
             died_of_poison: false,
             died_in_tide: false,
@@ -90,6 +111,14 @@ impl Player {
 
     pub fn tile_pos(&self) -> (i32, i32) {
         (self.pos.x.floor() as i32, self.pos.y.floor() as i32)
+    }
+
+    pub fn facing(&self) -> Facing {
+        self.facing
+    }
+
+    pub fn set_facing(&mut self, facing: Facing) {
+        self.facing = facing;
     }
 
     /// The tile one step in the direction the player is facing — used for
@@ -110,18 +139,19 @@ impl Player {
             self.walk_phase = 0.0;
 
             // Deplete stats over time at 0.2x rate when sleeping
-            self.hunger = (self.hunger - 0.2 * dt * 0.2).max(0.0);
-            self.hydration = (self.hydration - 0.3 * dt * 0.2).max(0.0);
+            self.stats.hunger = (self.stats.hunger - 0.2 * dt * 0.2).max(0.0);
+            self.stats.thirst = (self.stats.thirst - 0.3 * dt * 0.2).max(0.0);
+            self.stats.energy = (self.stats.energy + 2.0 * dt).min(100.0);
 
-            if self.hunger <= 0.0 || self.hydration <= 0.0 {
+            if self.stats.hunger <= 0.0 || self.stats.thirst <= 0.0 {
                 // Deplete health if starving or dehydrated (normal depletion rate)
-                self.health = (self.health - 1.5 * dt).max(0.0);
-            } else if self.health < 100.0 {
+                self.stats.health = (self.stats.health - 1.5 * dt).max(0.0);
+            } else if self.stats.health < 100.0 {
                 // Sleep regenerates health at 4.0x rate (0.5 * dt * 4.0)
-                self.health = (self.health + 0.5 * dt * 4.0).min(100.0);
+                self.stats.health = (self.stats.health + 0.5 * dt * 4.0).min(100.0);
             }
 
-            if self.health <= 0.0 {
+            if self.stats.health <= 0.0 {
                 self.is_sleeping = false;
             }
             self.update_tide_exposure(dt, world);
@@ -173,15 +203,23 @@ impl Player {
         }
 
         // Deplete stats over time
-        self.hunger = (self.hunger - 0.2 * dt).max(0.0);
-        self.hydration = (self.hydration - 0.3 * dt).max(0.0);
+        self.stats.hunger = (self.stats.hunger - 0.2 * dt).max(0.0);
+        self.stats.thirst = (self.stats.thirst - 0.3 * dt).max(0.0);
+        self.stats.energy = if self.moving {
+            (self.stats.energy - 0.12 * dt).max(0.0)
+        } else {
+            (self.stats.energy + 0.08 * dt).min(100.0)
+        };
+        self.stats.strength = (60.0 + self.stats.hunger * 0.2 + self.stats.energy * 0.2
+            - self.stats.carried_weight * 0.5)
+            .clamp(0.0, 100.0);
 
-        if self.hunger <= 0.0 || self.hydration <= 0.0 {
+        if self.stats.hunger <= 0.0 || self.stats.thirst <= 0.0 || self.stats.energy <= 0.0 {
             // Deplete health if starving or dehydrated
-            self.health = (self.health - 1.5 * dt).max(0.0);
-        } else if self.health < 100.0 {
+            self.stats.health = (self.stats.health - 1.5 * dt).max(0.0);
+        } else if self.stats.health < 100.0 {
             // Slowly regenerate health if well-fed and hydrated
-            self.health = (self.health + 0.5 * dt).min(100.0);
+            self.stats.health = (self.stats.health + 0.5 * dt).min(100.0);
         }
 
         self.update_tide_exposure(dt, world);
@@ -192,7 +230,7 @@ impl Player {
             self.tide_seconds += dt;
             if self.tide_seconds >= 10.0 {
                 self.died_in_tide = true;
-                self.health = 0.0;
+                self.stats.health = 0.0;
             }
         } else {
             self.tide_seconds = 0.0;
@@ -263,6 +301,19 @@ impl Player {
                 );
             }
         }
+    }
+
+    pub fn draw_sleeping(&self, atlas: &Atlas, screen_center: Vec2) {
+        let frame = if (get_time() * 1.4) as u64 % 2 == 0 {
+            0
+        } else {
+            1
+        };
+        atlas.draw(
+            SpriteId::new(9, frame),
+            screen_center.x,
+            screen_center.y + 3.0,
+        );
     }
 }
 

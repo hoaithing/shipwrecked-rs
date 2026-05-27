@@ -1,5 +1,6 @@
 //! Inventory and item system.
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 pub const OBJECT_SPRITE_PALETTE: [i32; 120] = [
@@ -125,7 +126,7 @@ pub const OBJECT_SPRITE_PALETTE: [i32; 120] = [
     852044, // index 119 (Wool)
 ];
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub enum Item {
     Mango,
@@ -642,7 +643,7 @@ impl Item {
     }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Inventory {
     pub counts: HashMap<Item, u32>,
     pub chest: HashMap<Item, u32>,

@@ -11,8 +11,9 @@ pub enum Action {
     Left,
     Right,
     Fire,
+    Pickup,
+    Examine,
     LeftSoft,
-    RightSoft,
     /// Numpad / quick slot 1..=9
     Slot(u8),
     Sleep,
@@ -54,14 +55,17 @@ pub fn poll() -> ActionState {
         s.held.push(Action::Right);
     }
     // Pressed-edge actions
-    if is_key_pressed(KeyCode::Space) || is_key_pressed(KeyCode::Enter) {
+    if is_key_pressed(KeyCode::Enter) {
         s.pressed.push(Action::Fire);
+    }
+    if is_key_pressed(KeyCode::Space) {
+        s.pressed.push(Action::Pickup);
     }
     if is_key_pressed(KeyCode::Q) {
         s.pressed.push(Action::LeftSoft);
     }
     if is_key_pressed(KeyCode::E) {
-        s.pressed.push(Action::RightSoft);
+        s.pressed.push(Action::Examine);
     }
     if is_key_pressed(KeyCode::Z) {
         s.pressed.push(Action::Sleep);
@@ -69,7 +73,7 @@ pub fn poll() -> ActionState {
     if is_key_pressed(KeyCode::I) {
         s.pressed.push(Action::Inventory);
     }
-    if is_key_pressed(KeyCode::C) {
+    if is_key_pressed(KeyCode::C) || is_key_pressed(KeyCode::F) {
         s.pressed.push(Action::CraftMenu);
     }
     for (k, n) in [

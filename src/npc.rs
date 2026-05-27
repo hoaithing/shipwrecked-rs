@@ -41,7 +41,11 @@ pub struct Npc {
     pub speed: f32,
     /// How far from `home` they'll wander before turning back.
     pub home_radius: f32,
+    /// 0.0..1.0 walk cycle phase for animated animal sprites.
+    pub anim_phase: f32,
 }
+
+const BIRD_FLEE_RADIUS: f32 = 2.35;
 
 impl Npc {
     pub fn new(key: &'static str, drop: Item, sprite: u32, x: i32, y: i32) -> Self {
@@ -74,6 +78,7 @@ impl Npc {
             wander_timer: 0.0,
             speed,
             home_radius: 6.0,
+            anim_phase: 0.0,
         }
     }
 
@@ -113,6 +118,13 @@ impl Npc {
             self.vel.y = 0.0;
             self.wander_timer = self.wander_timer.min(0.3);
         }
+
+        if self.vel.length_squared() > 0.01 {
+            self.update_facing();
+            self.anim_phase = (self.anim_phase + dt * animal_anim_rate(self.key)) % 1.0;
+        } else {
+            self.anim_phase = 0.0;
+        }
     }
 
     fn pick_new_direction(&mut self) {
@@ -142,6 +154,237 @@ impl Npc {
                 Facing::North
             };
         }
+    }
+
+    pub fn current_sprite(&self) -> u32 {
+        let frames = animal_animation_frames(self.key, self.facing);
+        if frames.is_empty() {
+            return self.sprite;
+        }
+        if self.vel.length_squared() <= 0.01 {
+            return frames[0];
+        }
+        let frame = (self.anim_phase * frames.len() as f32) as usize % frames.len();
+        frames[frame]
+    }
+
+    pub fn flee_from(&mut self, source: Vec2) {
+        let away = self.pos - source;
+        let dir = if away.length_squared() > 0.01 {
+            away.normalize()
+        } else {
+            vec2(1.0, 0.0)
+        };
+        self.vel = dir * self.speed * 1.35;
+        self.wander_timer = 0.9;
+        self.update_facing();
+    }
+
+    pub fn flee_if_player_too_close(&mut self, player_pos: Vec2) -> bool {
+        if !is_fleeing_bird(self.key) {
+            return false;
+        }
+
+        if (self.pos - player_pos).length_squared() > BIRD_FLEE_RADIUS * BIRD_FLEE_RADIUS {
+            return false;
+        }
+
+        self.flee_from(player_pos);
+        self.wander_timer = self.wander_timer.max(1.1);
+        true
+    }
+}
+
+pub fn is_fleeing_bird(key: &str) -> bool {
+    matches!(
+        key,
+        "animal_green_parrot"
+            | "animal_seagull"
+            | "animal_pelican"
+            | "animal_toucan"
+            | "animal_red_ibis"
+    )
+}
+
+pub fn animal_examine_text(npc: &Npc, has_bow: bool, has_arrow: bool) -> String {
+    let name = npc.drop.label();
+    let hunt_text = if has_bow && has_arrow {
+        "Face it and press E to hunt it."
+    } else if has_bow {
+        "You need arrows before you can hunt it."
+    } else {
+        "Craft a bow and arrows before hunting it."
+    };
+    match npc.key {
+        "animal_alligator" | "animal_jaguar" | "animal_green_snake" | "animal_boa"
+        | "animal_shark" => {
+            format!("Dangerous {name}. Keep your distance. {hunt_text}")
+        }
+        "animal_green_parrot"
+        | "animal_seagull"
+        | "animal_pelican"
+        | "animal_toucan"
+        | "animal_red_ibis" => {
+            format!("{name}. It will flee if you get too close. {hunt_text}")
+        }
+        "animal_crab" | "animal_turtle" | "animal_green_iguana" => {
+            format!("{name}. It is small, quick, and hard to grab. {hunt_text}")
+        }
+        _ => format!("{name}. Approach carefully. {hunt_text}"),
+    }
+}
+
+pub fn direct_interaction_text(
+    npc: &mut Npc,
+    player_pos: Vec2,
+    has_bow: bool,
+    has_arrow: bool,
+) -> String {
+    if matches!(
+        npc.key,
+        "animal_alligator" | "animal_jaguar" | "animal_green_snake" | "animal_boa" | "animal_shark"
+    ) {
+        return format!("The {} attacks as you get too close!", npc.drop.label());
+    }
+
+    npc.flee_from(player_pos);
+    if has_bow && has_arrow {
+        format!("The {} bolts away. Face it and press E.", npc.drop.label())
+    } else if has_bow {
+        format!(
+            "The {} bolts away. You need arrows to hunt it.",
+            npc.drop.label()
+        )
+    } else {
+        format!(
+            "The {} bolts away. You need a bow and arrows.",
+            npc.drop.label()
+        )
+    }
+}
+
+fn animal_anim_rate(key: &str) -> f32 {
+    match key {
+        "animal_turtle" | "animal_green_snake" | "animal_boa" | "animal_shark" => 2.5,
+        "animal_green_parrot"
+        | "animal_seagull"
+        | "animal_pelican"
+        | "animal_toucan"
+        | "animal_red_ibis" => 7.0,
+        _ => 4.5,
+    }
+}
+
+fn animal_animation_frames(key: &str, facing: Facing) -> &'static [u32] {
+    let east = matches!(facing, Facing::East);
+    match key {
+        "animal_wild_goat" => {
+            if east {
+                &[2, 3]
+            } else {
+                &[0, 1]
+            }
+        }
+        "animal_turtle" => {
+            if east {
+                &[8, 9]
+            } else {
+                &[6, 7]
+            }
+        }
+        "animal_peccary" => {
+            if east {
+                &[12, 13]
+            } else {
+                &[10, 11]
+            }
+        }
+        "animal_alligator" => {
+            if east {
+                &[16, 17]
+            } else {
+                &[14, 15]
+            }
+        }
+        "animal_porcupine" => {
+            if east {
+                &[20, 21]
+            } else {
+                &[18, 19]
+            }
+        }
+        "animal_crab" => &[40, 41],
+        "animal_green_iguana" => {
+            if east {
+                &[44, 45]
+            } else {
+                &[42, 43]
+            }
+        }
+        "animal_boa" => {
+            if east {
+                &[48, 49]
+            } else {
+                &[46, 47]
+            }
+        }
+        "animal_green_snake" => {
+            if east {
+                &[54, 55]
+            } else {
+                &[52, 53]
+            }
+        }
+        "animal_seagull" => {
+            if east {
+                &[72, 73]
+            } else {
+                &[70, 71]
+            }
+        }
+        "animal_pelican" => {
+            if east {
+                &[80, 81]
+            } else {
+                &[78, 79]
+            }
+        }
+        "animal_jaguar" => {
+            if east {
+                &[88, 89]
+            } else {
+                &[86, 87]
+            }
+        }
+        "animal_shark" => {
+            if east {
+                &[93, 94, 95]
+            } else {
+                &[90, 91, 92]
+            }
+        }
+        "animal_green_parrot" => {
+            if east {
+                &[104, 105]
+            } else {
+                &[102, 103]
+            }
+        }
+        "animal_red_ibis" => {
+            if east {
+                &[112, 113]
+            } else {
+                &[110, 111]
+            }
+        }
+        "animal_toucan" => {
+            if east {
+                &[120, 121]
+            } else {
+                &[118, 119]
+            }
+        }
+        _ => &[],
     }
 }
 
@@ -184,4 +427,74 @@ pub fn spawn_animals(world: &mut World) -> Vec<Npc> {
         }
     }
     npcs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn moving_animals_advance_between_sheet_frames() {
+        let mut goat = Npc::new("animal_wild_goat", Item::WildGoat, 0, 0, 0);
+        assert_eq!(goat.current_sprite(), 0);
+
+        goat.vel = vec2(1.0, 0.0);
+        goat.facing = Facing::East;
+        goat.anim_phase = 0.0;
+        assert_eq!(goat.current_sprite(), 2);
+
+        goat.anim_phase = 0.55;
+        assert_eq!(goat.current_sprite(), 3);
+    }
+
+    #[test]
+    fn shark_uses_three_frame_swim_cycle() {
+        let mut shark = Npc::new("animal_shark", Item::Shark, 90, 0, 0);
+        shark.vel = vec2(-1.0, 0.0);
+        shark.facing = Facing::West;
+
+        shark.anim_phase = 0.0;
+        assert_eq!(shark.current_sprite(), 90);
+        shark.anim_phase = 0.4;
+        assert_eq!(shark.current_sprite(), 91);
+        shark.anim_phase = 0.8;
+        assert_eq!(shark.current_sprite(), 92);
+    }
+
+    #[test]
+    fn harmless_direct_interaction_makes_animal_flee() {
+        let mut goat = Npc::new("animal_wild_goat", Item::WildGoat, 0, 2, 0);
+        let text = direct_interaction_text(&mut goat, vec2(0.5, 0.5), true, true);
+
+        assert!(text.contains("bolts away"));
+        assert!(goat.vel.length_squared() > 0.01);
+        assert!(goat.wander_timer > 0.0);
+    }
+
+    #[test]
+    fn dangerous_direct_interaction_warns_about_attack() {
+        let mut jaguar = Npc::new("animal_jaguar", Item::Jaguar, 86, 2, 0);
+        let text = direct_interaction_text(&mut jaguar, vec2(0.5, 0.5), true, true);
+
+        assert!(text.contains("attacks"));
+        assert_eq!(jaguar.vel, Vec2::ZERO);
+    }
+
+    #[test]
+    fn birds_flee_when_player_gets_close() {
+        let mut bird = Npc::new("animal_green_parrot", Item::GreenParrot, 102, 2, 0);
+        let player_pos = vec2(0.5, 0.5);
+
+        assert!(bird.flee_if_player_too_close(player_pos));
+        assert!(bird.vel.length_squared() > 0.01);
+        assert!((bird.vel.normalize()).dot((bird.pos - player_pos).normalize()) > 0.9);
+    }
+
+    #[test]
+    fn non_birds_do_not_auto_flee_on_proximity() {
+        let mut goat = Npc::new("animal_wild_goat", Item::WildGoat, 0, 1, 0);
+
+        assert!(!goat.flee_if_player_too_close(vec2(0.5, 0.5)));
+        assert_eq!(goat.vel, Vec2::ZERO);
+    }
 }

@@ -2,3 +2,6 @@ target/
 .antigravitycli/
 .idea/
 Robinson_java/
+.save/
+saves/
+tools/

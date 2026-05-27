@@ -28,6 +28,8 @@ pub const MAP_BYTES: usize = MAP_W * MAP_H;
 /// byte in `BIGislandFULL.byt` indexes directly into the 16-sprite BS1
 /// sheet. So we match: TILE = 16, world is 180×180 = 2880×2880 px.
 pub const TILE: f32 = 16.0;
+pub const CAMP_FLAG_TILE: (i32, i32) = (24, 129);
+pub const CAMP_BUILD_TILES: &[(i32, i32)] = &[(23, 129), (25, 129), (24, 130)];
 
 /// Base terrain. The 16 raw byte IDs in `BIGislandFULL.byt` map 1:1 onto
 /// the 16 sprites of BS1, so the byte IS the sprite index. We classify
@@ -217,6 +219,10 @@ impl World {
         }
     }
 
+    pub fn apply_tide_level_for_save(&mut self) {
+        self.apply_tide_level();
+    }
+
     #[inline]
     pub fn index(x: i32, y: i32) -> Option<usize> {
         if x < 0 || y < 0 || (x as usize) >= MAP_W || (y as usize) >= MAP_H {
@@ -396,6 +402,14 @@ impl World {
             self.player_built.insert(i);
         }
         true
+    }
+
+    pub fn is_camp_flag_tile(x: i32, y: i32) -> bool {
+        (x, y) == CAMP_FLAG_TILE
+    }
+
+    pub fn is_camp_build_tile(x: i32, y: i32) -> bool {
+        CAMP_BUILD_TILES.contains(&(x, y))
     }
 
     /// The original game hardcodes the player's initial coordinates to (8, 148)
@@ -635,6 +649,15 @@ mod tests {
         world.tide_target = 1.0;
 
         assert!(world.walkable_for_player(0, 0));
+    }
+
+    #[test]
+    fn camp_home_build_tiles_are_reserved_near_flag() {
+        assert!(World::is_camp_flag_tile(24, 129));
+        assert!(World::is_camp_build_tile(23, 129));
+        assert!(World::is_camp_build_tile(25, 129));
+        assert!(World::is_camp_build_tile(24, 130));
+        assert!(!World::is_camp_build_tile(24, 128));
     }
 }
 
@@ -1039,7 +1062,35 @@ pub fn draw(
         }
     }
 
-    // Pass 4: static objects (cabin, trees, bushes, campfire, items).
+    // Pass 4: non-blocking object visuals. Canopy coconuts use this path so
+    // they remain visible high in the palm without becoming ground pickups.
+    for ty in start_ty..end_ty {
+        for tx in start_tx..end_tx {
+            let Some(placement) = world.object_at(tx, ty) else {
+                continue;
+            };
+            let Some(def) = objects::definition(placement.key) else {
+                continue;
+            };
+            if def.blocking || def.sprite.is_none() {
+                continue;
+            }
+            let p = tile_screen(tx, ty);
+            if !object_sprites.draw(
+                placement.key,
+                p.x + TILE * 0.5,
+                p.y + TILE * 0.5,
+                def.anchor,
+                WHITE,
+            ) {
+                if let Some(sprite) = def.sprite {
+                    atlas.draw(sprite, p.x + TILE * def.anchor.0, p.y + TILE * def.anchor.1);
+                }
+            }
+        }
+    }
+
+    // Pass 5: static objects (cabin, trees, bushes, campfire, items).
     for ty in start_ty..end_ty {
         for tx in start_tx..end_tx {
             let Some(placement) = world.static_object_at(tx, ty) else {
@@ -1093,6 +1144,6 @@ pub fn draw_npcs(
         }
         let sx = viewport_origin.x + npc.pos.x * TILE - origin_x_px;
         let sy = viewport_origin.y + npc.pos.y * TILE - origin_y_px;
-        atlas.draw(SpriteId::new(2, npc.sprite), sx, sy);
+        atlas.draw(SpriteId::new(2, npc.current_sprite()), sx, sy);
     }
 }
