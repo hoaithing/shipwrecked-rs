@@ -334,6 +334,7 @@ pub const CONSTRUCTIONS_RECIPES: &[Recipe] = &[
 ];
 
 /// Helper to check if an item is placed as a physical construction structure on the map.
+#[allow(dead_code)]
 pub fn is_construction(item: Item) -> bool {
     matches!(
         item,

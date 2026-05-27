@@ -10,6 +10,8 @@
 //! wander within a small radius of their spawn point so they don't drift
 //! off across the whole map.
 
+use crate::inventory::Item;
+use crate::objects;
 use crate::world::World;
 use macroquad::prelude::*;
 
@@ -22,8 +24,9 @@ pub enum Facing {
 }
 
 pub struct Npc {
-    /// The byte ID from the Objects layer — used to look up the BS2 sprite.
-    pub byte_id: u8,
+    pub key: &'static str,
+    pub drop: Item,
+    pub sprite: u32,
     /// Position in tile coordinates (fractional). Center of a tile is +0.5.
     pub pos: Vec2,
     /// Where this NPC was spawned. They wander around this point.
@@ -41,22 +44,29 @@ pub struct Npc {
 }
 
 impl Npc {
-    pub fn new(byte_id: u8, x: i32, y: i32) -> Self {
+    pub fn new(key: &'static str, drop: Item, sprite: u32, x: i32, y: i32) -> Self {
         let pos = vec2(x as f32 + 0.5, y as f32 + 0.5);
 
         // Animals move at different speeds. Bumped up from earlier tuning
         // so they feel lively — the original game's animals moved quickly
         // too. Birds dart, sharks chase, turtles still amble.
-        let speed = match byte_id {
-            48 => 1.5,                     // turtle — slow but visible
-            56 => 5.0,                     // shark — fast in water
-            44 | 52..=54 | 63 | 64 => 5.0, // birds — fast
-            5 | 42 | 50 => 4.0,            // goat / crab / large animals
-            _ => 3.0,                      // default wandering speed
+        let speed = match key {
+            "animal_turtle" => 1.5,
+            "animal_shark" => 5.0,
+            "animal_jaguar"
+            | "animal_green_parrot"
+            | "animal_seagull"
+            | "animal_pelican"
+            | "animal_toucan"
+            | "animal_red_ibis" => 5.0,
+            "animal_wild_goat" | "animal_crab" | "animal_boa" => 4.0,
+            _ => 3.0, // default wandering speed
         };
 
         Self {
-            byte_id,
+            key,
+            drop,
+            sprite,
             pos,
             home: pos,
             vel: Vec2::ZERO,
@@ -89,7 +99,7 @@ impl Npc {
         // Move with per-axis collision so we can slide.
         let step = self.vel * dt;
         let nx = self.pos.x + step.x;
-        if can_walk_for(self.byte_id, world, nx, self.pos.y) {
+        if can_walk_for(self.key, world, nx, self.pos.y) {
             self.pos.x = nx;
         } else {
             // Hit a wall horizontally — pick a new direction soon.
@@ -97,7 +107,7 @@ impl Npc {
             self.wander_timer = self.wander_timer.min(0.3);
         }
         let ny = self.pos.y + step.y;
-        if can_walk_for(self.byte_id, world, self.pos.x, ny) {
+        if can_walk_for(self.key, world, self.pos.x, ny) {
             self.pos.y = ny;
         } else {
             self.vel.y = 0.0;
@@ -138,7 +148,7 @@ impl Npc {
 /// Whether a given animal can stand on a tile. Sharks need water; land
 /// animals need to be on walkable land. We don't enforce strict types
 /// (a deer could theoretically walk on dirt), just block water-vs-land.
-fn can_walk_for(byte_id: u8, world: &World, x: f32, y: f32) -> bool {
+fn can_walk_for(key: &str, world: &World, x: f32, y: f32) -> bool {
     use crate::world::Terrain;
     let tx = x.floor() as i32;
     let ty = y.floor() as i32;
@@ -147,7 +157,7 @@ fn can_walk_for(byte_id: u8, world: &World, x: f32, y: f32) -> bool {
         t,
         Terrain::ShallowWater | Terrain::DeepWater | Terrain::LilyWater
     );
-    let is_water_animal = matches!(byte_id, 53 | 56); // water bird, shark
+    let is_water_animal = matches!(key, "animal_seagull" | "animal_shark");
     if is_water_animal {
         // Water animals only walk in water (no terrain rendering on land).
         is_water
@@ -163,12 +173,14 @@ fn can_walk_for(byte_id: u8, world: &World, x: f32, y: f32) -> bool {
 pub fn spawn_animals(world: &mut World) -> Vec<Npc> {
     let mut npcs = Vec::new();
     for i in 0..world.objects.len() {
-        let b = world.objects[i];
-        if World::is_mobile_animal_id(b) {
+        let Some(placement) = world.objects[i].as_ref() else {
+            continue;
+        };
+        if let Some((drop, sprite)) = objects::animal_for_key(placement.key) {
             let x = (i % crate::world::MAP_W) as i32;
             let y = (i / crate::world::MAP_W) as i32;
-            npcs.push(Npc::new(b, x, y));
-            world.objects[i] = 0;
+            npcs.push(Npc::new(placement.key, drop, sprite, x, y));
+            world.objects[i] = None;
         }
     }
     npcs

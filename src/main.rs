@@ -10,6 +10,7 @@ mod display;
 mod input;
 mod inventory;
 mod npc;
+mod objects;
 mod player;
 mod recipes;
 mod save;
@@ -21,6 +22,7 @@ use daynight::DayNight;
 use display::Display;
 use input::Action;
 use inventory::{Inventory, Item};
+use objects::{Interaction, ObjectSprites, StructureUse};
 use player::Player;
 use recipes::{CONSTRUCTIONS_RECIPES, CREATIONS_RECIPES};
 use world::World;
@@ -112,14 +114,13 @@ fn get_contextual_action(
         }
     }
 
-    // Check coconut throwing (palm tree in decor layer)
-    if let Some(idx) = World::index(fx, fy) {
-        let did = world.decor[idx];
-        if matches!(did, 1 | 5 | 13 | 18 | 21 | 22 | 49) {
-            if inventory.counts.get(&Item::Stone).copied().unwrap_or(0) > 0 {
-                return ContextualAction::ThrowStone;
-            }
-        }
+    // Check coconut throwing against named tree-like decor.
+    if world
+        .decor_at(fx, fy)
+        .is_some_and(|placement| objects::is_tree_like_key(placement.key))
+        && inventory.counts.get(&Item::Stone).copied().unwrap_or(0) > 0
+    {
+        return ContextualAction::ThrowStone;
     }
 
     ContextualAction::None
@@ -167,6 +168,7 @@ async fn main() {
     let atlas = Atlas::load("assets/atlas.json", "assets/sprites")
         .await
         .expect("failed to load sprite atlas");
+    let object_sprites = ObjectSprites::load("assets/objects").await;
     let spawn = world.spawn_tile();
     println!("spawn: ({}, {})", spawn.0, spawn.1);
 
@@ -226,22 +228,23 @@ async fn main() {
 
             let loop_dt = if player.is_sleeping { dt * 15.0 } else { dt };
 
-            // Update tide state based on current phase
+            // Update tide target based on current phase. The visible waterline
+            // moves gradually in World::update_tide below.
             let phase = day_night.phase();
             let is_low_tide =
                 (phase >= 0.417 && phase <= 0.583) || (phase >= 0.917 || phase <= 0.083);
-            if is_low_tide != world.tide_low {
-                world.update_tide(is_low_tide);
+            if world.set_tide_target(is_low_tide) {
                 toast = Some(Toast {
                     text: if is_low_tide {
-                        "The tide is low! The crossing is open.".to_owned()
+                        "The tide is receding. The crossing is opening.".to_owned()
                     } else {
-                        "The tide is rising! The crossing is flooding.".to_owned()
+                        "The tide is rising. Reach higher ground.".to_owned()
                     },
                     icon: None,
                     seconds_left: 3.0,
                 });
             }
+            world.update_tide(loop_dt);
 
             player.update(loop_dt, &actions, &world);
 
@@ -255,6 +258,10 @@ async fn main() {
                 let death_msg = if player.died_of_poison {
                     player.died_of_poison = false;
                     "That food was poisonous - you're dead!".to_owned()
+                } else if player.died_in_tide {
+                    player.died_in_tide = false;
+                    player.tide_seconds = 0.0;
+                    "The tide took you - you're dead!".to_owned()
                 } else {
                     "Collapsed from exhaustion!".to_owned()
                 };
@@ -387,55 +394,49 @@ async fn main() {
                     }
                     ContextualAction::HuntAnimal(idx) => {
                         inventory.counts.entry(Item::Arrow).and_modify(|c| *c -= 1);
-                        let byte_id = npcs[idx].byte_id;
+                        let drop = npcs[idx].drop;
                         npcs.remove(idx);
-                        if let Some(item) =
-                            Item::from_j2me_index(byte_id.saturating_sub(1) as usize)
-                        {
-                            inventory.add(item, 1);
-                            toast = Some(Toast {
-                                text: format!("Got {}!", item.label()),
-                                icon: Some(item.icon_index()),
-                                seconds_left: 2.0,
-                            });
-                        } else {
-                            toast = Some(Toast {
-                                text: "No usable drop.".to_owned(),
-                                icon: None,
-                                seconds_left: 2.0,
-                            });
-                        }
+                        inventory.add(drop, 1);
+                        toast = Some(Toast {
+                            text: format!("Got {}!", drop.label()),
+                            icon: Some(drop.icon_index()),
+                            seconds_left: 2.0,
+                        });
                     }
                     ContextualAction::None => {
                         let (fx, fy) = player.facing_tile();
                         let mut interacted_structure = false;
-                        if let Some(idx) = World::index(fx, fy) {
-                            let oid = world.objects[idx];
-                            if oid > 0
-                                && World::is_structure_id(oid)
-                                && world.player_built.contains(&idx)
-                            {
-                                interacted_structure = true;
-                                if matches!(oid, 10 | 16 | 86) {
-                                    player.is_sleeping = !player.is_sleeping;
-                                    toast = Some(Toast {
-                                        text: if player.is_sleeping {
-                                            "Sleeping...".to_owned()
-                                        } else {
-                                            "Woke up.".to_owned()
-                                        },
-                                        icon: None,
-                                        seconds_left: 2.0,
-                                    });
-                                } else if matches!(oid, 11 | 51) {
-                                    state = GameState::Menu;
-                                    menu_tab = 6;
-                                    selected_slot = 0;
-                                    storage_left_selected = true;
-                                } else {
-                                    state = GameState::Menu;
-                                    menu_tab = 1;
-                                    selected_slot = 0;
+                        if let Some(placement) = world.object_at(fx, fy) {
+                            if placement.built {
+                                if let Some(def) = objects::definition(placement.key) {
+                                    if let Interaction::Structure(kind) = def.interaction {
+                                        interacted_structure = true;
+                                        match kind {
+                                            StructureUse::Sleep => {
+                                                player.is_sleeping = !player.is_sleeping;
+                                                toast = Some(Toast {
+                                                    text: if player.is_sleeping {
+                                                        "Sleeping...".to_owned()
+                                                    } else {
+                                                        "Woke up.".to_owned()
+                                                    },
+                                                    icon: None,
+                                                    seconds_left: 2.0,
+                                                });
+                                            }
+                                            StructureUse::Storage => {
+                                                state = GameState::Menu;
+                                                menu_tab = 6;
+                                                selected_slot = 0;
+                                                storage_left_selected = true;
+                                            }
+                                            StructureUse::Craft => {
+                                                state = GameState::Menu;
+                                                menu_tab = 1;
+                                                selected_slot = 0;
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -833,9 +834,8 @@ async fn main() {
                             inventory.counts.entry(ing).and_modify(|c| *c -= qty);
                         }
                     }
-                    if let Some(idx) = World::index(fx, fy) {
-                        world.objects[idx] = (item.j2me_index() + 1) as u8;
-                        world.player_built.insert(idx);
+                    if let Some(key) = objects::key_for_item(item) {
+                        world.place_object_key(fx, fy, key, true);
                     }
                     toast = Some(Toast {
                         text: format!("Placed {}!", item.label()),
@@ -865,6 +865,7 @@ async fn main() {
             &dpy,
             &world,
             &atlas,
+            &object_sprites,
             &player,
             &npcs,
             &inventory,
@@ -914,6 +915,7 @@ fn draw_scene(
     dpy: &Display,
     world: &World,
     atlas: &Atlas,
+    object_sprites: &ObjectSprites,
     player: &Player,
     npcs: &[npc::Npc],
     inventory: &Inventory,
@@ -926,7 +928,14 @@ fn draw_scene(
     let play_origin = vec2(0.0, 0.0);
     let play_size = vec2(dpy.view_w, dpy.play_h());
 
-    world::draw(world, atlas, player.world_pos(), play_origin, play_size);
+    world::draw(
+        world,
+        atlas,
+        object_sprites,
+        player.world_pos(),
+        play_origin,
+        play_size,
+    );
     // NPCs are drawn between the static world and the player so the player
     // appears on top of any animal sharing their cell.
     world::draw_npcs(npcs, atlas, player.world_pos(), play_origin, play_size);
@@ -996,6 +1005,22 @@ fn draw_scene(
             fsize2,
             Color::from_rgba(200, 200, 200, 255),
         );
+    }
+
+    if player.tide_seconds > 0.0 {
+        let secs_left = (10.0 - player.tide_seconds).max(0.0).ceil() as i32;
+        let label = format!("TIDE WATER: reach higher ground in {}s", secs_left);
+        let dim = dpy.measure_text(&label, 12.0);
+        let x = (dpy.view_w - dim.width) * 0.5;
+        let y = dpy.play_h() - 18.0;
+        draw_rectangle(
+            x - 6.0,
+            y - 11.0,
+            dim.width + 12.0,
+            15.0,
+            Color::from_rgba(20, 45, 70, 210),
+        );
+        dpy.draw_text(&label, x, y, 12.0, Color::from_rgba(180, 230, 255, 255));
     }
 
     // HUD strip at the bottom.
@@ -1104,7 +1129,17 @@ fn draw_scene(
         )
     };
 
-    let tide_str = if world.tide_low { "Low" } else { "High" };
+    let tide_str = if (world.tide_level - world.tide_target).abs() > 0.01 {
+        if world.tide_target > world.tide_level {
+            "Rising"
+        } else {
+            "Receding"
+        }
+    } else if world.tide_low {
+        "Low"
+    } else {
+        "High"
+    };
     let clock_str = format!(
         "Day {} • {:02}:{:02} ({} in {}s) • Tide: {}",
         day_night.day_count, hour, minute, next_phase_label, secs_left, tide_str
@@ -1964,12 +1999,18 @@ fn draw_tabbed_menu(
                 Color::from_rgba(200, 200, 200, 255),
             );
 
-            let tide_status = if world.tide_low {
+            let tide_status = if (world.tide_level - world.tide_target).abs() > 0.01 {
+                if world.tide_target > world.tide_level {
+                    "TIDE RISING"
+                } else {
+                    "TIDE RECEDING"
+                }
+            } else if world.tide_low {
                 "LOW TIDE"
             } else {
                 "HIGH TIDE"
             };
-            let tide_color = if world.tide_low { GREEN } else { BLUE };
+            let tide_color = if world.tide_target < 0.5 { GREEN } else { BLUE };
             let dim_tide = dpy.measure_text(tide_status, 14.0);
             dpy.draw_text(
                 tide_status,

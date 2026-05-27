@@ -16,7 +16,9 @@
 
 use crate::atlas::{Atlas, SpriteId};
 use crate::decor;
+use crate::objects::{self, Interaction, ObjectPlacement, ObjectSprites, RenderLayer};
 use macroquad::prelude::*;
+use serde::Deserialize;
 
 pub const MAP_W: usize = 540;
 pub const MAP_H: usize = 540;
@@ -78,65 +80,94 @@ pub fn classify_terrain(id: u8) -> Terrain {
     }
 }
 
-fn tile_hash(x: i32, y: i32) -> u32 {
-    let mut h = (x as u32).wrapping_mul(0x1E1F5F71);
-    h = h ^ (y as u32).wrapping_mul(0x1F2E3D4C);
-    h = h.rotate_left(5);
-    h
+fn tide_full_byte(original: u8, level: f32) -> u8 {
+    if level >= 0.67 {
+        original
+    } else if level >= 0.34 {
+        match original {
+            4 => 0,
+            5 => 4,
+            _ => original,
+        }
+    } else {
+        match original {
+            4 => 0,
+            5 => 4,
+            6 => 5,
+            _ => original,
+        }
+    }
 }
 
-/// The five raw layers, stored as Vec<u8> for cheap indexing. We expose
-/// terrain through `terrain_at` (which classifies on the fly) but keep
-/// the raw bytes around for the rarer layers in case we need exact IDs
-/// later (e.g. picking the right object sprite for tile id 53).
+fn tide_border_byte(original: u8, level: f32) -> u8 {
+    if level >= 0.67 {
+        original
+    } else if level >= 0.34 {
+        match original {
+            7 => 0,
+            19 => 7,
+            6 => 0,
+            18 => 6,
+            5 => 0,
+            17 => 5,
+            _ => original,
+        }
+    } else {
+        match original {
+            7 => 0,
+            19 => 7,
+            22 => 19,
+            6 => 0,
+            18 => 6,
+            21 => 18,
+            5 => 0,
+            17 => 5,
+            20 => 17,
+            _ => original,
+        }
+    }
+}
+
+/// Terrain-style Tiled layers stay as byte vectors for cheap indexing.
+/// Authored objects and decor are named placements resolved through the
+/// object registry.
 pub struct World {
     pub full: Vec<u8>,
     pub borders: Vec<u8>,
-    pub decor: Vec<u8>,
-    pub objects: Vec<u8>,
+    pub decor: Vec<Option<ObjectPlacement>>,
+    pub objects: Vec<Option<ObjectPlacement>>,
     pub rocks: Vec<u8>,
-    pub decor_stages: Vec<u8>,
     pub original_full: Vec<u8>,
     pub original_borders: Vec<u8>,
     pub tide_low: bool,
+    pub tide_level: f32,
+    pub tide_target: f32,
     pub player_built: std::collections::HashSet<usize>,
 }
 
 impl World {
     pub async fn load(maps_dir: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let full = load_png_layer(maps_dir, "BIGislandFULL.png").await?;
-        let borders = load_png_layer(maps_dir, "BIGislandBorders.png").await?;
-        let decor = load_png_layer(maps_dir, "BIGislandDecor.png").await?;
-        let objects = load_png_layer(maps_dir, "BIGislandObjects.png").await?;
-        let rocks = load_png_layer(maps_dir, "BIGislandRocks.png").await?;
-
-        let mut decor_stages = vec![0u8; decor.len()];
-        for i in 0..decor.len() {
-            let x = (i % MAP_W) as i32;
-            let y = (i / MAP_W) as i32;
-            let did = decor[i];
-            if did != 0 {
-                let hash = tile_hash(x, y);
-                decor_stages[i] = match did {
-                    18 => (hash % 13) as u8,
-                    1 => (hash % 8) as u8,
-                    5 => (hash % 9) as u8,
-                    13 => (hash % 12) as u8,
-                    21 => (hash % 4) as u8,
-                    22 => (hash % 4) as u8,
-                    49 => (hash % 6) as u8,
-                    _ => 0,
-                };
-            }
-        }
+        let loaded = load_tiled_map(&format!("{maps_dir}/island.tmj")).await?;
+        let full = loaded.full;
+        let borders = loaded.borders;
+        let decor = loaded.decor;
+        let objects = loaded.objects;
+        let rocks = loaded.rocks;
 
         let original_full = full.clone();
         let original_borders = borders.clone();
 
         let mut player_built = std::collections::HashSet::new();
-        for i in 0..objects.len() {
-            let oid = objects[i];
-            if oid > 0 && Self::is_structure_id(oid) && oid != 51 {
+        let mut objects = objects;
+        for (i, placement) in objects.iter_mut().enumerate() {
+            if placement.as_ref().is_some_and(|placement| {
+                objects::definition(placement.key)
+                    .is_some_and(|def| matches!(def.interaction, Interaction::Structure(_)))
+                    && placement.key != "barrel"
+            }) {
+                if let Some(placement) = placement.as_mut() {
+                    placement.built = true;
+                }
                 player_built.insert(i);
             }
         }
@@ -147,54 +178,42 @@ impl World {
             decor,
             objects,
             rocks,
-            decor_stages,
             original_full,
             original_borders,
             tide_low: false,
+            tide_level: 1.0,
+            tide_target: 1.0,
             player_built,
         })
     }
 
-    pub fn update_tide(&mut self, low: bool) {
+    pub fn set_tide_target(&mut self, low: bool) -> bool {
         if self.tide_low == low {
-            return;
+            return false;
         }
         self.tide_low = low;
-        if low {
-            for i in 0..self.full.len() {
-                let f = self.full[i];
-                if f == 4 {
-                    self.full[i] = 0;
-                } else if f == 5 {
-                    self.full[i] = 4;
-                } else if f == 6 {
-                    self.full[i] = 5;
-                }
+        self.tide_target = if low { 0.0 } else { 1.0 };
+        true
+    }
 
-                let b = self.borders[i];
-                if b == 7 {
-                    self.borders[i] = 0;
-                } else if b == 19 {
-                    self.borders[i] = 7;
-                } else if b == 22 {
-                    self.borders[i] = 19;
-                } else if b == 6 {
-                    self.borders[i] = 0;
-                } else if b == 18 {
-                    self.borders[i] = 6;
-                } else if b == 21 {
-                    self.borders[i] = 18;
-                } else if b == 5 {
-                    self.borders[i] = 0;
-                } else if b == 17 {
-                    self.borders[i] = 5;
-                } else if b == 20 {
-                    self.borders[i] = 17;
-                }
-            }
-        } else {
-            self.full.copy_from_slice(&self.original_full);
-            self.borders.copy_from_slice(&self.original_borders);
+    pub fn update_tide(&mut self, dt: f32) {
+        const TIDE_MOVE_SECONDS: f32 = 10.0;
+        let old_level = self.tide_level;
+        let step = dt / TIDE_MOVE_SECONDS;
+        if self.tide_level < self.tide_target {
+            self.tide_level = (self.tide_level + step).min(self.tide_target);
+        } else if self.tide_level > self.tide_target {
+            self.tide_level = (self.tide_level - step).max(self.tide_target);
+        }
+        if (self.tide_level - old_level).abs() > f32::EPSILON {
+            self.apply_tide_level();
+        }
+    }
+
+    fn apply_tide_level(&mut self) {
+        for i in 0..self.full.len() {
+            self.full[i] = tide_full_byte(self.original_full[i], self.tide_level);
+            self.borders[i] = tide_border_byte(self.original_borders[i], self.tide_level);
         }
     }
 
@@ -214,42 +233,29 @@ impl World {
         classify_terrain(self.raw_full(x, y))
     }
 
+    pub fn is_tide_flooded(&self, x: i32, y: i32) -> bool {
+        Self::index(x, y).is_some_and(|i| {
+            self.original_full[i] == 4 && !classify_terrain(self.full[i]).walkable()
+        })
+    }
+
+    pub fn is_tide_rising(&self) -> bool {
+        self.tide_target > self.tide_level
+    }
+
     #[allow(dead_code)]
     pub fn has_object(&self, x: i32, y: i32) -> bool {
-        Self::index(x, y).is_some_and(|i| self.objects[i] != 0)
+        Self::index(x, y).is_some_and(|i| self.objects[i].is_some())
     }
 
-    /// Animals are mobile NPCs in the original game (sharks, deer, monkeys,
-    /// etc.) that move around — they don't actually block static positions.
-    pub fn is_animal_id(id: u8) -> bool {
-        matches!(id, 5 | 42..=56 | 62..=64)
-    }
-
-    /// Exact byte IDs that the original Java animal switch turns into
-    /// moving actors.
-    pub fn is_mobile_animal_id(id: u8) -> bool {
-        matches!(
-            id,
-            5 | 42 | 43 | 44 | 45 | 47 | 48 | 49 | 50 | 52 | 53 | 54 | 56 | 62 | 63 | 64
-        )
-    }
-
-    /// Spawn markers (85, 95) shouldn't block either — they're invisible
-    /// position-data, not actual objects.
-    pub fn is_marker_id(id: u8) -> bool {
-        matches!(id, 85 | 95 | 96)
-    }
-
-    /// Returns the static object id if there's one here that blocks
-    /// movement (i.e. trees and rocks, not animals or markers).
-    pub fn static_object_at(&self, x: i32, y: i32) -> Option<u8> {
+    /// Returns the static object placement if there's one here that blocks
+    /// movement (i.e. trees and structures, not animals or markers).
+    pub fn static_object_at(&self, x: i32, y: i32) -> Option<&ObjectPlacement> {
         let i = Self::index(x, y)?;
-        let id = self.objects[i];
-        if id == 0 || Self::is_animal_id(id) || Self::is_marker_id(id) {
-            None
-        } else {
-            Some(id)
-        }
+        let placement = self.objects[i].as_ref()?;
+        objects::definition(placement.key)
+            .is_some_and(|def| def.blocking)
+            .then_some(placement)
     }
 
     pub fn has_rock(&self, x: i32, y: i32) -> bool {
@@ -282,7 +288,11 @@ impl World {
 
     #[allow(dead_code)]
     pub fn has_decor(&self, x: i32, y: i32) -> bool {
-        Self::index(x, y).is_some_and(|i| self.decor[i] != 0)
+        Self::index(x, y).is_some_and(|i| {
+            self.decor[i].as_ref().is_some_and(|placement| {
+                objects::definition(placement.key).is_some_and(|def| def.blocking)
+            })
+        })
     }
 
     /// Can the player stand on this tile? Combines terrain walkability with
@@ -295,31 +305,23 @@ impl World {
             && !self.has_decor(x, y)
     }
 
-    /// Remove a static object from the given tile and return its byte ID,
-    /// or None if there was nothing chopable there. Used by the action
-    /// system to clear trees / pickups after the player interacts with them.
-    pub fn consume_object(&mut self, x: i32, y: i32) -> Option<u8> {
-        let i = Self::index(x, y)?;
-        let id = self.objects[i];
-        if id == 0
-            || Self::is_animal_id(id)
-            || Self::is_marker_id(id)
-            || (Self::is_structure_id(id) && self.player_built.contains(&i))
-        {
-            return None;
-        }
-        self.objects[i] = 0;
-        Some(id)
+    pub fn walkable_for_player(&self, x: i32, y: i32) -> bool {
+        (self.terrain_at(x, y).walkable() || (self.is_tide_rising() && self.is_tide_flooded(x, y)))
+            && self.static_object_at(x, y).is_none()
+            && !self.has_rock(x, y)
+            && !self.has_decor(x, y)
     }
 
-    pub fn is_structure_id(id: u8) -> bool {
-        // Tent [10], Cabin [11], Single bed [16], Fire [17], Pirate ship [20],
-        // Rug machine [35], Barrel [51], Rug [61], Roasting spit [83], Double bed [86],
-        // Potter's wheel [89], Raft [95], Weaving machine [118]
-        matches!(
-            id,
-            10 | 11 | 16 | 17 | 20 | 35 | 51 | 61 | 83 | 86 | 89 | 95 | 118
-        )
+    /// Remove a consumable named object from the given tile.
+    pub fn consume_object(&mut self, x: i32, y: i32) -> Option<Interaction> {
+        let i = Self::index(x, y)?;
+        let placement = self.objects[i].as_ref()?;
+        let def = objects::definition(placement.key)?;
+        let Interaction::Pickup(_, _) = def.interaction else {
+            return None;
+        };
+        self.objects[i] = None;
+        Some(def.interaction)
     }
 
     pub fn has_structure_near(
@@ -329,13 +331,18 @@ impl World {
         structure_item: crate::inventory::Item,
         radius: i32,
     ) -> bool {
-        let byte_id = (structure_item.j2me_index() + 1) as u8;
+        let Some(structure_key) = objects::key_for_item(structure_item) else {
+            return false;
+        };
         for dy in -radius..=radius {
             for dx in -radius..=radius {
                 let x = tx + dx;
                 let y = ty + dy;
                 if let Some(idx) = Self::index(x, y) {
-                    if self.objects[idx] == byte_id {
+                    if self.objects[idx]
+                        .as_ref()
+                        .is_some_and(|placement| placement.key == structure_key)
+                    {
                         return true;
                     }
                 }
@@ -353,15 +360,42 @@ impl World {
         None
     }
 
-    /// Remove a decor element from the given tile and return its byte ID.
-    pub fn consume_decor(&mut self, x: i32, y: i32) -> Option<u8> {
+    /// Remove a consumable named decor element from the given tile.
+    pub fn consume_decor(&mut self, x: i32, y: i32) -> Option<Interaction> {
         let i = Self::index(x, y)?;
-        let id = self.decor[i];
-        if id == 0 {
+        let placement = self.decor[i].as_ref()?;
+        let def = objects::definition(placement.key)?;
+        let Interaction::Pickup(_, _) = def.interaction else {
             return None;
+        };
+        self.decor[i] = None;
+        Some(def.interaction)
+    }
+
+    pub fn object_at(&self, x: i32, y: i32) -> Option<&ObjectPlacement> {
+        Self::index(x, y).and_then(|i| self.objects[i].as_ref())
+    }
+
+    pub fn decor_at(&self, x: i32, y: i32) -> Option<&ObjectPlacement> {
+        Self::index(x, y).and_then(|i| self.decor[i].as_ref())
+    }
+
+    pub fn place_object_key(&mut self, x: i32, y: i32, key: &'static str, built: bool) -> bool {
+        let Some(i) = Self::index(x, y) else {
+            return false;
+        };
+        if objects::definition(key).is_none() {
+            return false;
         }
-        self.decor[i] = 0;
-        Some(id)
+        self.objects[i] = Some(ObjectPlacement {
+            key,
+            stage: 0,
+            built,
+        });
+        if built {
+            self.player_built.insert(i);
+        }
+        true
     }
 
     /// The original game hardcodes the player's initial coordinates to (8, 148)
@@ -372,21 +406,236 @@ impl World {
     }
 }
 
-async fn load_png_layer(maps_dir: &str, name: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let path = format!("{maps_dir}/{name}");
-    let img = macroquad::texture::load_image(&path).await?;
-    if img.width as usize != MAP_W || img.height as usize != MAP_H {
+struct LoadedTiledMap {
+    full: Vec<u8>,
+    borders: Vec<u8>,
+    rocks: Vec<u8>,
+    objects: Vec<Option<ObjectPlacement>>,
+    decor: Vec<Option<ObjectPlacement>>,
+}
+
+#[derive(Deserialize)]
+struct TiledMap {
+    width: usize,
+    height: usize,
+    tilewidth: usize,
+    tileheight: usize,
+    layers: Vec<TiledLayer>,
+}
+
+#[derive(Deserialize)]
+struct TiledLayer {
+    name: String,
+    #[serde(default)]
+    data: Vec<u32>,
+    #[serde(default)]
+    objects: Vec<TiledObject>,
+}
+
+#[derive(Deserialize)]
+struct TiledObject {
+    name: String,
+    x: f32,
+    y: f32,
+    #[serde(default)]
+    properties: Vec<TiledProperty>,
+}
+
+#[derive(Deserialize)]
+struct TiledProperty {
+    name: String,
+    value: serde_json::Value,
+}
+
+async fn load_tiled_map(path: &str) -> Result<LoadedTiledMap, Box<dyn std::error::Error>> {
+    let bytes = macroquad::file::load_file(path).await?;
+    parse_tiled_map_bytes(&bytes)
+}
+
+fn parse_tiled_map_bytes(bytes: &[u8]) -> Result<LoadedTiledMap, Box<dyn std::error::Error>> {
+    let map: TiledMap = serde_json::from_slice(bytes)?;
+    if map.width != MAP_W || map.height != MAP_H || map.tilewidth != 16 || map.tileheight != 16 {
         return Err(format!(
-            "{path}: expected {MAP_W}×{MAP_H} image, got {}×{}",
-            img.width, img.height
+            "island.tmj: expected {MAP_W}x{MAP_H} tiles at 16x16, got {}x{} at {}x{}",
+            map.width, map.height, map.tilewidth, map.tileheight
         )
         .into());
     }
-    let mut bytes = vec![0u8; MAP_BYTES];
-    for i in 0..MAP_BYTES {
-        bytes[i] = img.bytes[i * 4];
+
+    let mut full = None;
+    let mut borders = None;
+    let mut rocks = None;
+    let mut objects = vec![None; MAP_BYTES];
+    let mut decor = vec![None; MAP_BYTES];
+
+    for layer in map.layers {
+        match layer.name.as_str() {
+            "terrain" => full = Some(tile_data_to_bytes(&layer.data, "terrain")?),
+            "borders" => borders = Some(tile_data_to_bytes(&layer.data, "borders")?),
+            "rocks" => rocks = Some(tile_data_to_bytes(&layer.data, "rocks")?),
+            "objects" => load_object_layer(&mut objects, &layer.objects, false)?,
+            "decor" => load_object_layer(&mut decor, &layer.objects, false)?,
+            "animals" => load_object_layer(&mut objects, &layer.objects, false)?,
+            "markers" => load_object_layer(&mut objects, &layer.objects, false)?,
+            _ => {}
+        }
     }
-    Ok(bytes)
+
+    Ok(LoadedTiledMap {
+        full: full.ok_or("island.tmj: missing terrain layer")?,
+        borders: borders.ok_or("island.tmj: missing borders layer")?,
+        rocks: rocks.ok_or("island.tmj: missing rocks layer")?,
+        objects,
+        decor,
+    })
+}
+
+fn tile_data_to_bytes(data: &[u32], layer: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    if data.len() != MAP_BYTES {
+        return Err(format!(
+            "{layer}: expected {MAP_BYTES} tile entries, got {}",
+            data.len()
+        )
+        .into());
+    }
+    data.iter()
+        .map(|&value| {
+            u8::try_from(value)
+                .map_err(|_| format!("{layer}: tile value {value} exceeds u8").into())
+        })
+        .collect()
+}
+
+fn load_object_layer(
+    target: &mut [Option<ObjectPlacement>],
+    objects_in_layer: &[TiledObject],
+    built: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for object in objects_in_layer {
+        let key = object_key(object)?;
+        if objects::definition(key).is_none() {
+            return Err(format!("island.tmj: unknown object/decor key '{key}'").into());
+        }
+        let tx = (object.x / TILE).floor() as i32;
+        let ty = (object.y / TILE).floor() as i32;
+        let Some(i) = World::index(tx, ty) else {
+            return Err(format!("island.tmj: object '{key}' outside map at {tx},{ty}").into());
+        };
+        target[i] = Some(ObjectPlacement {
+            key,
+            stage: object_u8_property(object, "stage").unwrap_or(0),
+            built,
+        });
+    }
+    Ok(())
+}
+
+fn object_key(object: &TiledObject) -> Result<&'static str, Box<dyn std::error::Error>> {
+    let raw_key = object
+        .properties
+        .iter()
+        .find(|property| property.name == "key")
+        .and_then(|property| property.value.as_str())
+        .unwrap_or(object.name.as_str());
+    objects::definition(raw_key)
+        .map(|def| def.key)
+        .ok_or_else(|| format!("island.tmj: unknown object/decor key '{raw_key}'").into())
+}
+
+fn object_u8_property(object: &TiledObject, key: &str) -> Option<u8> {
+    object.properties.iter().find_map(|property| {
+        (property.name == key)
+            .then(|| {
+                property
+                    .value
+                    .as_u64()
+                    .and_then(|value| u8::try_from(value).ok())
+            })
+            .flatten()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tiny_world(full_byte: u8) -> World {
+        let mut full = vec![0; MAP_BYTES];
+        full[0] = full_byte;
+        World {
+            full: full.clone(),
+            borders: vec![0; MAP_BYTES],
+            decor: vec![None; MAP_BYTES],
+            objects: vec![None; MAP_BYTES],
+            rocks: vec![0; MAP_BYTES],
+            original_full: full,
+            original_borders: vec![0; MAP_BYTES],
+            tide_low: false,
+            tide_level: 1.0,
+            tide_target: 1.0,
+            player_built: std::collections::HashSet::new(),
+        }
+    }
+
+    #[test]
+    fn island_tmj_loads_and_resolves_named_placements() {
+        let loaded = parse_tiled_map_bytes(include_bytes!("../assets/maps/island.tmj")).unwrap();
+
+        assert_eq!(loaded.full.len(), MAP_BYTES);
+        assert_eq!(loaded.borders.len(), MAP_BYTES);
+        assert_eq!(loaded.rocks.len(), MAP_BYTES);
+        assert_eq!(loaded.objects.iter().filter(|p| p.is_some()).count(), 3616);
+        assert_eq!(loaded.decor.iter().filter(|p| p.is_some()).count(), 8855);
+
+        for placement in loaded.objects.iter().chain(loaded.decor.iter()).flatten() {
+            assert!(objects::definition(placement.key).is_some());
+            assert!(!placement.key.chars().all(|c| c.is_ascii_digit()));
+        }
+    }
+
+    #[test]
+    fn island_tmj_has_no_raw_source_id_properties() {
+        let json: serde_json::Value =
+            serde_json::from_slice(include_bytes!("../assets/maps/island.tmj")).unwrap();
+        for layer in json["layers"].as_array().unwrap() {
+            for object in layer["objects"].as_array().into_iter().flatten() {
+                let name = object["name"].as_str().unwrap_or_default();
+                assert!(!name.chars().all(|c| c.is_ascii_digit()));
+                let props = object["properties"].as_array().unwrap();
+                assert!(props.iter().all(|prop| prop["name"] != "source_id"));
+            }
+        }
+    }
+
+    #[test]
+    fn tide_moves_gradually_instead_of_flipping_immediately() {
+        let mut world = tiny_world(4);
+
+        assert!(world.set_tide_target(true));
+        world.update_tide(1.0);
+
+        assert!(world.tide_level > 0.0);
+        assert_eq!(world.full[0], 4);
+
+        world.update_tide(10.0);
+
+        assert_eq!(world.tide_level, 0.0);
+        assert_eq!(world.full[0], 0);
+    }
+
+    #[test]
+    fn tide_shallows_are_player_walkable_only_while_rising() {
+        let mut world = tiny_world(4);
+
+        assert!(world.is_tide_flooded(0, 0));
+        assert!(!world.walkable(0, 0));
+        assert!(!world.walkable_for_player(0, 0));
+
+        world.tide_level = 0.5;
+        world.tide_target = 1.0;
+
+        assert!(world.walkable_for_player(0, 0));
+    }
 }
 
 pub const OBJECT_SPRITE_PALETTE: [i32; 120] = [
@@ -646,6 +895,7 @@ pub const BORDERS_PALETTE: [i32; 22] = [
 pub fn draw(
     world: &World,
     atlas: &Atlas,
+    object_sprites: &ObjectSprites,
     camera_world: Vec2,
     viewport_origin: Vec2,
     viewport_size: Vec2,
@@ -725,37 +975,44 @@ pub fn draw(
         }
     }
 
-    // Pass 3: decor — rendered using DECOR_PALETTE and composite trees logic.
+    // Pass 3: decor — rendered through named registry entries.
     for ty in start_ty..end_ty {
         for tx in start_tx..end_tx {
             let Some(i) = World::index(tx, ty) else {
                 continue;
             };
-            let did = world.decor[i] as usize;
-            if did == 0 || did >= DECOR_PALETTE.len() {
+            let Some(placement) = world.decor[i].as_ref() else {
+                continue;
+            };
+            let Some(def) = objects::definition(placement.key) else {
+                continue;
+            };
+            if def.render_layer != RenderLayer::Decor {
                 continue;
             }
             let p = tile_screen(tx, ty);
-            let did_u8 = did as u8;
-            if matches!(did_u8, 18 | 1 | 5 | 13 | 21 | 22 | 49) {
-                let stage = world.decor_stages[i];
+            if let Some(composite) = def.composite {
                 // 1. Draw shadow base: BS9 sprite 3 center-anchored
                 atlas.draw(SpriteId::new(9, 3), p.x + TILE * 0.5, p.y + TILE * 0.5);
 
                 // 2. Draw base stump
-                let val = DECOR_PALETTE[did];
-                if val > 0 {
-                    let sheet = (val >> 16) as u32;
-                    let sprite = (val & 0xFFFF) as u32;
-                    atlas.draw(
-                        SpriteId::new(sheet, sprite),
-                        p.x + TILE * 0.5,
-                        p.y + TILE * 0.5,
-                    );
+                if !object_sprites.draw(
+                    placement.key,
+                    p.x + TILE * 0.5,
+                    p.y + TILE * 0.5,
+                    def.anchor,
+                    WHITE,
+                ) {
+                    if let Some(sprite) = def.sprite {
+                        atlas.draw(sprite, p.x + TILE * 0.5, p.y + TILE * 0.5);
+                    }
                 }
 
                 // 3. Draw stacked foliage/trunk segments
-                if let Some(segments) = decor::get_composite_decor(did_u8, stage) {
+                if let Some(segments) = decor::get_composite_decor(
+                    objects::composite_decor_id(composite),
+                    placement.stage,
+                ) {
                     for seg in segments {
                         if seg.sprite_id > 0 {
                             let sheet = (seg.sprite_id >> 16) as u32;
@@ -768,42 +1025,40 @@ pub fn draw(
                         }
                     }
                 }
-            } else {
-                let val = DECOR_PALETTE[did];
-                if val > 0 {
-                    let sheet = (val >> 16) as u32;
-                    let sprite = (val & 0xFFFF) as u32;
-                    atlas.draw(
-                        SpriteId::new(sheet, sprite),
-                        p.x + TILE * 0.5,
-                        p.y + TILE * 0.5,
-                    );
+            } else if !object_sprites.draw(
+                placement.key,
+                p.x + TILE * 0.5,
+                p.y + TILE * 0.5,
+                def.anchor,
+                WHITE,
+            ) {
+                if let Some(sprite) = def.sprite {
+                    atlas.draw(sprite, p.x + TILE * 0.5, p.y + TILE * 0.5);
                 }
             }
         }
     }
 
     // Pass 4: static objects (cabin, trees, bushes, campfire, items).
-    // Uses OBJECT_SPRITE_PALETTE.
     for ty in start_ty..end_ty {
         for tx in start_tx..end_tx {
-            let Some(id) = world.static_object_at(tx, ty) else {
+            let Some(placement) = world.static_object_at(tx, ty) else {
                 continue;
             };
-            let oid = id as usize;
-            if oid == 0 || oid > OBJECT_SPRITE_PALETTE.len() {
+            let Some(def) = objects::definition(placement.key) else {
                 continue;
-            }
-            let val = OBJECT_SPRITE_PALETTE[oid - 1];
-            if val >= 0 {
-                let sheet = (val >> 16) as u32;
-                let sprite = (val & 0xFFFF) as u32;
+            };
+            if let Some(sprite) = def.sprite {
                 let p = tile_screen(tx, ty);
-                atlas.draw(
-                    SpriteId::new(sheet, sprite),
+                if !object_sprites.draw(
+                    placement.key,
                     p.x + TILE * 0.5,
                     p.y + TILE * 0.5,
-                );
+                    def.anchor,
+                    WHITE,
+                ) {
+                    atlas.draw(sprite, p.x + TILE * def.anchor.0, p.y + TILE * def.anchor.1);
+                }
             }
         }
     }
@@ -836,35 +1091,8 @@ pub fn draw_npcs(
         if npc.pos.x < left || npc.pos.x > right || npc.pos.y < top || npc.pos.y > bottom {
             continue;
         }
-        let Some(sprite_idx) = animal_sprite_id(npc.byte_id) else {
-            continue;
-        };
         let sx = viewport_origin.x + npc.pos.x * TILE - origin_x_px;
         let sy = viewport_origin.y + npc.pos.y * TILE - origin_y_px;
-        atlas.draw(SpriteId::new(2, sprite_idx), sx, sy);
+        atlas.draw(SpriteId::new(2, npc.sprite), sx, sy);
     }
-}
-
-/// Map an animal byte ID to a sprite in BS2.
-/// Extracted from the switch in `Robinson_java/decompiled/world.java`.
-pub fn animal_sprite_id(byte_id: u8) -> Option<u32> {
-    Some(match byte_id {
-        5 => 0,    // wild goat
-        42 => 40,  // crab
-        43 => 14,  // small reptile
-        44 => 86,  // colorful birds
-        45 => 10,  // peccary
-        47 => 18,  // porcupine
-        48 => 6,   // turtle
-        49 => 52,  // green snake
-        50 => 46,  // boa
-        52 => 102, // green parrot
-        53 => 70,  // seagull
-        54 => 78,  // pelican
-        56 => 90,  // shark
-        62 => 42,  // green iguana
-        63 => 118, // toucan
-        64 => 110, // red ibis
-        _ => return None,
-    })
 }

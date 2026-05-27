@@ -374,6 +374,7 @@ impl Item {
         }
     }
 
+    #[allow(dead_code)]
     pub fn from_j2me_index(idx: usize) -> Option<Self> {
         match idx {
             0 => Some(Item::Mango),

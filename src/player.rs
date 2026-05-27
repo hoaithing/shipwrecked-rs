@@ -53,6 +53,8 @@ pub struct Player {
     pub health: f32,
     pub is_sleeping: bool,
     pub died_of_poison: bool,
+    pub died_in_tide: bool,
+    pub tide_seconds: f32,
     // Equipped Clothing:
     pub equipped_hat: Option<Item>,
     pub equipped_jacket: Option<Item>,
@@ -73,6 +75,8 @@ impl Player {
             health: 100.0,
             is_sleeping: false,
             died_of_poison: false,
+            died_in_tide: false,
+            tide_seconds: 0.0,
             equipped_hat: None,
             equipped_jacket: None,
             equipped_pants: None,
@@ -120,6 +124,7 @@ impl Player {
             if self.health <= 0.0 {
                 self.is_sleeping = false;
             }
+            self.update_tide_exposure(dt, world);
             return;
         }
 
@@ -153,11 +158,11 @@ impl Player {
             // Per-axis box collision: try X then Y separately so we can slide
             // along walls instead of stopping cold. Checks a 0.25 tile radius around player center.
             let nx = self.pos.x + dx * step;
-            if check_walkable(world, nx, self.pos.y, 0.25, 0.25) {
+            if check_player_walkable(world, nx, self.pos.y, 0.25, 0.25) {
                 self.pos.x = nx;
             }
             let ny = self.pos.y + dy * step;
-            if check_walkable(world, self.pos.x, ny, 0.25, 0.25) {
+            if check_player_walkable(world, self.pos.x, ny, 0.25, 0.25) {
                 self.pos.y = ny;
             }
 
@@ -177,6 +182,20 @@ impl Player {
         } else if self.health < 100.0 {
             // Slowly regenerate health if well-fed and hydrated
             self.health = (self.health + 0.5 * dt).min(100.0);
+        }
+
+        self.update_tide_exposure(dt, world);
+    }
+
+    fn update_tide_exposure(&mut self, dt: f32, world: &World) {
+        if world.is_tide_rising() && self.is_in_tide(world) {
+            self.tide_seconds += dt;
+            if self.tide_seconds >= 10.0 {
+                self.died_in_tide = true;
+                self.health = 0.0;
+            }
+        } else {
+            self.tide_seconds = 0.0;
         }
     }
 
@@ -352,7 +371,7 @@ fn clothing_sprite_index(item: Item, facing: Facing, walk_frame: u32) -> Option<
     Some(base + frame)
 }
 
-fn check_walkable(world: &World, px: f32, py: f32, rx: f32, ry: f32) -> bool {
+fn check_player_walkable(world: &World, px: f32, py: f32, rx: f32, ry: f32) -> bool {
     let check_points = [
         (px - rx, py - ry),
         (px + rx, py - ry),
@@ -360,9 +379,23 @@ fn check_walkable(world: &World, px: f32, py: f32, rx: f32, ry: f32) -> bool {
         (px + rx, py + ry),
     ];
     for &(cx, cy) in &check_points {
-        if !world.walkable(cx.floor() as i32, cy.floor() as i32) {
+        if !world.walkable_for_player(cx.floor() as i32, cy.floor() as i32) {
             return false;
         }
     }
     true
+}
+
+impl Player {
+    pub fn is_in_tide(&self, world: &World) -> bool {
+        let check_points = [
+            (self.pos.x - 0.25, self.pos.y - 0.25),
+            (self.pos.x + 0.25, self.pos.y - 0.25),
+            (self.pos.x - 0.25, self.pos.y + 0.25),
+            (self.pos.x + 0.25, self.pos.y + 0.25),
+        ];
+        check_points
+            .iter()
+            .any(|&(cx, cy)| world.is_tide_flooded(cx.floor() as i32, cy.floor() as i32))
+    }
 }

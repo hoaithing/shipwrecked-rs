@@ -61,9 +61,10 @@ impl Display {
         let scale = scale.clamp(MIN_SCALE, MAX_SCALE);
 
         // Render target is created at high-resolution window size to support
-        // high-resolution vector font rasterization.
+        // high-resolution vector font rasterization. Keep the final sample
+        // nearest-neighbor so pixel-art assets stay crisp.
         let target = render_target((view_w * scale) as u32, (view_h * scale) as u32);
-        target.texture.set_filter(FilterMode::Linear);
+        target.texture.set_filter(FilterMode::Nearest);
 
         // `from_display_rect` already sets a negative Y zoom so (0,0) is
         // top-left and Y grows downward, matching the default screen-space
