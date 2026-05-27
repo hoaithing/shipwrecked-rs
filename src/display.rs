@@ -87,7 +87,10 @@ impl Display {
 
     /// Window dimensions in real screen pixels.
     pub fn window_size(&self) -> (i32, i32) {
-        ((self.view_w * self.scale) as i32, (self.view_h * self.scale) as i32)
+        (
+            (self.view_w * self.scale) as i32,
+            (self.view_h * self.scale) as i32,
+        )
     }
 
     /// Height of the play area (everything above the HUD strip).

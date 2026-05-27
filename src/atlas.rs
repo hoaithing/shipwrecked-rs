@@ -100,6 +100,10 @@ impl Atlas {
     /// is at the feet, so passing the tile center makes the character
     /// stand on the tile.
     pub fn draw(&self, id: SpriteId, dx: f32, dy: f32) {
+        self.draw_tinted(id, dx, dy, WHITE);
+    }
+
+    pub fn draw_tinted(&self, id: SpriteId, dx: f32, dy: f32, tint: Color) {
         let Some(rect) = self.rect(id) else { return };
         let Some(tex) = self.sheets.get(id.sheet()).and_then(Option::as_ref) else {
             return;
@@ -110,7 +114,7 @@ impl Atlas {
             tex,
             dx - rect.anchor_x as f32,
             dy - rect.anchor_y as f32,
-            WHITE,
+            tint,
             DrawTextureParams {
                 source: Some(Rect {
                     x: rect.x as f32,

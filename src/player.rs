@@ -30,11 +30,13 @@ impl Facing {
         match self {
             Facing::South => 0,
             Facing::North => 5,
-            Facing::West  => 10,
-            Facing::East  => 15,
+            Facing::West => 10,
+            Facing::East => 15,
         }
     }
 }
+
+use crate::inventory::Item;
 
 pub struct Player {
     /// Position in tile coordinates (fractional). Center of a tile is +0.5.
@@ -49,6 +51,13 @@ pub struct Player {
     pub hunger: f32,
     pub hydration: f32,
     pub health: f32,
+    pub is_sleeping: bool,
+    pub died_of_poison: bool,
+    // Equipped Clothing:
+    pub equipped_hat: Option<Item>,
+    pub equipped_jacket: Option<Item>,
+    pub equipped_pants: Option<Item>,
+    pub equipped_shoes: Option<Item>,
 }
 
 impl Player {
@@ -62,6 +71,12 @@ impl Player {
             hunger: 100.0,
             hydration: 100.0,
             health: 100.0,
+            is_sleeping: false,
+            died_of_poison: false,
+            equipped_hat: None,
+            equipped_jacket: None,
+            equipped_pants: None,
+            equipped_shoes: None,
         }
     }
 
@@ -80,18 +95,52 @@ impl Player {
         match self.facing {
             Facing::North => (tx, ty - 1),
             Facing::South => (tx, ty + 1),
-            Facing::West  => (tx - 1, ty),
-            Facing::East  => (tx + 1, ty),
+            Facing::West => (tx - 1, ty),
+            Facing::East => (tx + 1, ty),
         }
     }
 
     pub fn update(&mut self, dt: f32, input: &ActionState, world: &World) {
+        if self.is_sleeping {
+            self.moving = false;
+            self.walk_phase = 0.0;
+
+            // Deplete stats over time at 0.2x rate when sleeping
+            self.hunger = (self.hunger - 0.2 * dt * 0.2).max(0.0);
+            self.hydration = (self.hydration - 0.3 * dt * 0.2).max(0.0);
+
+            if self.hunger <= 0.0 || self.hydration <= 0.0 {
+                // Deplete health if starving or dehydrated (normal depletion rate)
+                self.health = (self.health - 1.5 * dt).max(0.0);
+            } else if self.health < 100.0 {
+                // Sleep regenerates health at 4.0x rate (0.5 * dt * 4.0)
+                self.health = (self.health + 0.5 * dt * 4.0).min(100.0);
+            }
+
+            if self.health <= 0.0 {
+                self.is_sleeping = false;
+            }
+            return;
+        }
+
         let mut dx: f32 = 0.0;
         let mut dy: f32 = 0.0;
-        if input.is_held(Action::Up)    { dy -= 1.0; self.facing = Facing::North; }
-        if input.is_held(Action::Down)  { dy += 1.0; self.facing = Facing::South; }
-        if input.is_held(Action::Left)  { dx -= 1.0; self.facing = Facing::West;  }
-        if input.is_held(Action::Right) { dx += 1.0; self.facing = Facing::East;  }
+        if input.is_held(Action::Up) {
+            dy -= 1.0;
+            self.facing = Facing::North;
+        }
+        if input.is_held(Action::Down) {
+            dy += 1.0;
+            self.facing = Facing::South;
+        }
+        if input.is_held(Action::Left) {
+            dx -= 1.0;
+            self.facing = Facing::West;
+        }
+        if input.is_held(Action::Right) {
+            dx += 1.0;
+            self.facing = Facing::East;
+        }
 
         self.moving = dx != 0.0 || dy != 0.0;
         if self.moving {
@@ -101,14 +150,14 @@ impl Player {
             dy /= len;
             let step = self.speed * dt;
 
-            // Per-axis collision: try X then Y separately so we can slide
-            // along walls instead of stopping cold.
+            // Per-axis box collision: try X then Y separately so we can slide
+            // along walls instead of stopping cold. Checks a 0.25 tile radius around player center.
             let nx = self.pos.x + dx * step;
-            if world.walkable(nx.floor() as i32, self.pos.y.floor() as i32) {
+            if check_walkable(world, nx, self.pos.y, 0.25, 0.25) {
                 self.pos.x = nx;
             }
             let ny = self.pos.y + dy * step;
-            if world.walkable(self.pos.x.floor() as i32, ny.floor() as i32) {
+            if check_walkable(world, self.pos.x, ny, 0.25, 0.25) {
                 self.pos.y = ny;
             }
 
@@ -150,10 +199,170 @@ impl Player {
         let id = SpriteId::new(3, self.current_sprite_index());
 
         if atlas.rect(id).is_some() {
-            atlas.draw(id, screen_center.x, screen_center.y);
+            atlas.draw(id, screen_center.x, screen_center.y + 3.0);
         } else {
             // Fallback marker if BS3 didn't load (file missing, etc.).
-            draw_circle(screen_center.x, screen_center.y, 4.0, RED);
+            draw_circle(screen_center.x, screen_center.y + 3.0, 4.0, RED);
+        }
+
+        // Draw clothing overlays from sheet 5
+        let sprite_frame = self.current_sprite_index() % 5;
+
+        // 1. Pants (lowest layer)
+        if let Some(pants) = self.equipped_pants {
+            if let Some(sp) = clothing_sprite_index(pants, self.facing, sprite_frame) {
+                atlas.draw(SpriteId::new(5, sp), screen_center.x, screen_center.y + 3.0);
+            }
+        }
+
+        // 2. Shoes
+        if let Some(shoes) = self.equipped_shoes {
+            if let Some(sp) = clothing_sprite_index(shoes, self.facing, sprite_frame) {
+                atlas.draw(SpriteId::new(5, sp), screen_center.x, screen_center.y + 3.0);
+            }
+        }
+
+        // 3. Jacket/Shirt
+        if let Some(jacket) = self.equipped_jacket {
+            if let Some(sp) = clothing_sprite_index(jacket, self.facing, sprite_frame) {
+                atlas.draw(SpriteId::new(5, sp), screen_center.x, screen_center.y + 3.0);
+            }
+        }
+
+        // 4. Hat (highest layer, bobbing walking cycle offset)
+        if let Some(hat) = self.equipped_hat {
+            if let Some(sp) = clothing_sprite_index(hat, self.facing, sprite_frame) {
+                let walk_offset = if self.moving && (sprite_frame == 1 || sprite_frame == 3) {
+                    -1.0
+                } else {
+                    0.0
+                };
+                atlas.draw(
+                    SpriteId::new(5, sp),
+                    screen_center.x,
+                    screen_center.y + 3.0 + walk_offset,
+                );
+            }
         }
     }
+}
+
+fn clothing_sprite_index(item: Item, facing: Facing, walk_frame: u32) -> Option<u32> {
+    let frame = walk_frame % 5;
+    let base = match item {
+        Item::TShirt => match facing {
+            Facing::North => 0,
+            Facing::South => 15,
+            Facing::West => 30,
+            Facing::East => 45,
+        },
+        Item::PirateJacket => match facing {
+            Facing::North => 5,
+            Facing::South => 20,
+            Facing::West => 35,
+            Facing::East => 50,
+        },
+        Item::WoolJacket => match facing {
+            Facing::North => 10,
+            Facing::South => 25,
+            Facing::West => 40,
+            Facing::East => 55,
+        },
+        Item::HideJacket => match facing {
+            Facing::North => 60,
+            Facing::South => 75,
+            Facing::West => 90,
+            Facing::East => 105,
+        },
+        Item::CottonPants => match facing {
+            Facing::North => 65,
+            Facing::South => 80,
+            Facing::West => 95,
+            Facing::East => 110,
+        },
+        Item::Loincloth => match facing {
+            Facing::North => 70,
+            Facing::South => 85,
+            Facing::West => 100,
+            Facing::East => 115,
+        },
+        Item::FurPants => match facing {
+            Facing::North => 120,
+            Facing::South => 135,
+            Facing::West => 150,
+            Facing::East => 165,
+        },
+        Item::WoolPants => match facing {
+            Facing::North => 125,
+            Facing::South => 140,
+            Facing::West => 155,
+            Facing::East => 170,
+        },
+        Item::HideShoe => match facing {
+            Facing::North => 130,
+            Facing::South => 145,
+            Facing::West => 160,
+            Facing::East => 175,
+        },
+        Item::CottonShoe => match facing {
+            Facing::North => 180,
+            Facing::South => 195,
+            Facing::West => 210,
+            Facing::East => 225,
+        },
+        Item::StrawShoe => match facing {
+            Facing::North => 185,
+            Facing::South => 200,
+            Facing::West => 215,
+            Facing::East => 230,
+        },
+        Item::FurShoe => match facing {
+            Facing::North => 190,
+            Facing::South => 205,
+            Facing::West => 220,
+            Facing::East => 235,
+        },
+        // Hats (statically positioned relative to head)
+        Item::HideHat => match facing {
+            Facing::North => return Some(240),
+            Facing::South => return Some(241),
+            Facing::West => return Some(242),
+            Facing::East => return Some(243),
+        },
+        Item::Hat => match facing {
+            Facing::North => return Some(244),
+            Facing::South => return Some(245),
+            Facing::West => return Some(246),
+            Facing::East => return Some(247),
+        },
+        Item::StrawHat => match facing {
+            Facing::North => return Some(248),
+            Facing::South => return Some(249),
+            Facing::West => return Some(250),
+            Facing::East => return Some(251),
+        },
+        Item::FurHat => match facing {
+            Facing::North => return Some(252),
+            Facing::South => return Some(253),
+            Facing::West => return Some(254),
+            Facing::East => return Some(255),
+        },
+        _ => return None,
+    };
+    Some(base + frame)
+}
+
+fn check_walkable(world: &World, px: f32, py: f32, rx: f32, ry: f32) -> bool {
+    let check_points = [
+        (px - rx, py - ry),
+        (px + rx, py - ry),
+        (px - rx, py + ry),
+        (px + rx, py + ry),
+    ];
+    for &(cx, cy) in &check_points {
+        if !world.walkable(cx.floor() as i32, cy.floor() as i32) {
+            return false;
+        }
+    }
+    true
 }

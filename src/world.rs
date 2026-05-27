@@ -66,15 +66,15 @@ impl Terrain {
 ///   14    → Deep water (blocks)
 pub fn classify_terrain(id: u8) -> Terrain {
     match id {
-        0 | 8       => Terrain::Sand,
-        1 | 9       => Terrain::Grass,
-        2 | 10      => Terrain::Dirt,
-        3 | 11      => Terrain::Forest,
-        4 | 5 | 6   => Terrain::ShallowWater,
-        7 | 15      => Terrain::Dirt,         // dark earth, walkable
-        12 | 13     => Terrain::LilyWater,
-        14          => Terrain::DeepWater,
-        _           => Terrain::Empty,
+        0 | 8 => Terrain::Sand,
+        1 | 9 => Terrain::Grass,
+        2 | 10 => Terrain::Dirt,
+        3 | 11 => Terrain::Forest,
+        4 | 5 | 6 => Terrain::ShallowWater,
+        7 | 15 => Terrain::Dirt, // dark earth, walkable
+        12 | 13 => Terrain::LilyWater,
+        14 => Terrain::DeepWater,
+        _ => Terrain::Empty,
     }
 }
 
@@ -96,6 +96,10 @@ pub struct World {
     pub objects: Vec<u8>,
     pub rocks: Vec<u8>,
     pub decor_stages: Vec<u8>,
+    pub original_full: Vec<u8>,
+    pub original_borders: Vec<u8>,
+    pub tide_low: bool,
+    pub player_built: std::collections::HashSet<usize>,
 }
 
 impl World {
@@ -126,6 +130,17 @@ impl World {
             }
         }
 
+        let original_full = full.clone();
+        let original_borders = borders.clone();
+
+        let mut player_built = std::collections::HashSet::new();
+        for i in 0..objects.len() {
+            let oid = objects[i];
+            if oid > 0 && Self::is_structure_id(oid) && oid != 51 {
+                player_built.insert(i);
+            }
+        }
+
         Ok(Self {
             full,
             borders,
@@ -133,7 +148,54 @@ impl World {
             objects,
             rocks,
             decor_stages,
+            original_full,
+            original_borders,
+            tide_low: false,
+            player_built,
         })
+    }
+
+    pub fn update_tide(&mut self, low: bool) {
+        if self.tide_low == low {
+            return;
+        }
+        self.tide_low = low;
+        if low {
+            for i in 0..self.full.len() {
+                let f = self.full[i];
+                if f == 4 {
+                    self.full[i] = 0;
+                } else if f == 5 {
+                    self.full[i] = 4;
+                } else if f == 6 {
+                    self.full[i] = 5;
+                }
+
+                let b = self.borders[i];
+                if b == 7 {
+                    self.borders[i] = 0;
+                } else if b == 19 {
+                    self.borders[i] = 7;
+                } else if b == 22 {
+                    self.borders[i] = 19;
+                } else if b == 6 {
+                    self.borders[i] = 0;
+                } else if b == 18 {
+                    self.borders[i] = 6;
+                } else if b == 21 {
+                    self.borders[i] = 18;
+                } else if b == 5 {
+                    self.borders[i] = 0;
+                } else if b == 17 {
+                    self.borders[i] = 5;
+                } else if b == 20 {
+                    self.borders[i] = 17;
+                }
+            }
+        } else {
+            self.full.copy_from_slice(&self.original_full);
+            self.borders.copy_from_slice(&self.original_borders);
+        }
     }
 
     #[inline]
@@ -160,16 +222,22 @@ impl World {
     /// Animals are mobile NPCs in the original game (sharks, deer, monkeys,
     /// etc.) that move around — they don't actually block static positions.
     pub fn is_animal_id(id: u8) -> bool {
+        matches!(id, 5 | 42..=56 | 62..=64)
+    }
+
+    /// Exact byte IDs that the original Java animal switch turns into
+    /// moving actors.
+    pub fn is_mobile_animal_id(id: u8) -> bool {
         matches!(
             id,
-            3 | 5 | 41..=45 | 47..=50 | 52..=54 | 56..=60 | 62..=64
+            5 | 42 | 43 | 44 | 45 | 47 | 48 | 49 | 50 | 52 | 53 | 54 | 56 | 62 | 63 | 64
         )
     }
 
     /// Spawn markers (85, 95) shouldn't block either — they're invisible
     /// position-data, not actual objects.
     pub fn is_marker_id(id: u8) -> bool {
-        matches!(id, 85 | 95)
+        matches!(id, 85 | 95 | 96)
     }
 
     /// Returns the static object id if there's one here that blocks
@@ -187,7 +255,28 @@ impl World {
     pub fn has_rock(&self, x: i32, y: i32) -> bool {
         Self::index(x, y).is_some_and(|i| {
             let rid = self.rocks[i];
-            rid > 0 && rid < 50 && !matches!(rid, 10 | 11 | 12 | 18 | 20 | 22 | 23 | 24 | 30 | 31 | 32 | 38 | 41 | 42 | 43 | 44 | 45 | 46 | 47)
+            (1..=48).contains(&rid)
+                && !matches!(
+                    rid,
+                    10 | 11
+                        | 12
+                        | 18
+                        | 20
+                        | 22
+                        | 23
+                        | 24
+                        | 30
+                        | 31
+                        | 32
+                        | 38
+                        | 41
+                        | 42
+                        | 43
+                        | 44
+                        | 45
+                        | 46
+                        | 47
+                )
         })
     }
 
@@ -212,23 +301,56 @@ impl World {
     pub fn consume_object(&mut self, x: i32, y: i32) -> Option<u8> {
         let i = Self::index(x, y)?;
         let id = self.objects[i];
-        if id == 0 || Self::is_animal_id(id) || Self::is_marker_id(id) {
+        if id == 0
+            || Self::is_animal_id(id)
+            || Self::is_marker_id(id)
+            || (Self::is_structure_id(id) && self.player_built.contains(&i))
+        {
             return None;
         }
         self.objects[i] = 0;
         Some(id)
     }
 
-    /// Remove a rock from the given tile and return its byte ID.
-    /// Only rock IDs < 50 are physical rocks; >= 50 are metadata/walkable areas.
-    pub fn consume_rock(&mut self, x: i32, y: i32) -> Option<u8> {
-        let i = Self::index(x, y)?;
-        let id = self.rocks[i];
-        if id == 0 || id >= 50 {
-            return None;
+    pub fn is_structure_id(id: u8) -> bool {
+        // Tent [10], Cabin [11], Single bed [16], Fire [17], Pirate ship [20],
+        // Rug machine [35], Barrel [51], Rug [61], Roasting spit [83], Double bed [86],
+        // Potter's wheel [89], Raft [95], Weaving machine [118]
+        matches!(
+            id,
+            10 | 11 | 16 | 17 | 20 | 35 | 51 | 61 | 83 | 86 | 89 | 95 | 118
+        )
+    }
+
+    pub fn has_structure_near(
+        &self,
+        tx: i32,
+        ty: i32,
+        structure_item: crate::inventory::Item,
+        radius: i32,
+    ) -> bool {
+        let byte_id = (structure_item.j2me_index() + 1) as u8;
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                let x = tx + dx;
+                let y = ty + dy;
+                if let Some(idx) = Self::index(x, y) {
+                    if self.objects[idx] == byte_id {
+                        return true;
+                    }
+                }
+            }
         }
-        self.rocks[i] = 0;
-        Some(id)
+        false
+    }
+
+    /// The Java `RocksArray` is scenery/tutorial data, not an item layer.
+    /// Keep this as a no-op guard so action code cannot accidentally remove
+    /// cliffs, hills, stones, or tutorial markers.
+    #[allow(dead_code)]
+    pub fn consume_rock(&mut self, x: i32, y: i32) -> Option<u8> {
+        let _ = Self::index(x, y)?;
+        None
     }
 
     /// Remove a decor element from the given tile and return its byte ID.
@@ -283,7 +405,7 @@ pub const OBJECT_SPRITE_PALETTE: [i32; 120] = [
     851983, // index 12
     851987, // index 13
     851976, // index 14
-    -1, // index 15
+    -1,     // index 15
     851968, // index 16
     393219, // index 17
     393235, // index 18
@@ -322,13 +444,13 @@ pub const OBJECT_SPRITE_PALETTE: [i32; 120] = [
     131174, // index 51
     131142, // index 52
     131150, // index 53
-    -1, // index 54
+    -1,     // index 54
     131162, // index 55
     131106, // index 56
     131094, // index 57
     131168, // index 58
     131136, // index 59
-    -1, // index 60
+    -1,     // index 60
     131114, // index 61
     131190, // index 62
     131186, // index 63
@@ -353,7 +475,7 @@ pub const OBJECT_SPRITE_PALETTE: [i32; 120] = [
     852055, // index 82
     851986, // index 83
     393232, // index 84
-    -1, // index 85
+    -1,     // index 85
     852037, // index 86
     852038, // index 87
     852039, // index 88
@@ -391,7 +513,7 @@ pub const OBJECT_SPRITE_PALETTE: [i32; 120] = [
 ];
 
 pub const DECOR_PALETTE: [i32; 87] = [
-    0, // index 0
+    0,      // index 0
     458752, // index 1
     458753, // index 2
     458754, // index 3
@@ -511,8 +633,8 @@ pub const BORDERS_PALETTE: [i32; 22] = [
 /// Passes:
 ///   1. terrain — every visible tile, solid color base
 ///   1.5. borders — coastline edge tiles center-anchored
-///   2. decor — static scenery or J2ME composite trees
-///   3. rocks — small rock/pebble sprites from BS5 (thinned more)
+///   2. rocks — rock/cliff sprites from BS4
+///   3. decor — static scenery or J2ME composite trees
 ///   4. objects — sprites from BS7 (palm trees, bushes, camp pieces)
 ///   5. animals — small dots (placeholder)
 ///
@@ -527,46 +649,48 @@ pub fn draw(
     camera_world: Vec2,
     viewport_origin: Vec2,
     viewport_size: Vec2,
- ) {
-     let cam_x_px = camera_world.x * TILE;
-     let cam_y_px = camera_world.y * TILE;
-     let origin_x_px = cam_x_px - viewport_size.x * 0.5;
-     let origin_y_px = cam_y_px - viewport_size.y * 0.5;
- 
-     let start_tx = (origin_x_px / TILE).floor() as i32 - 1;
-     let start_ty = (origin_y_px / TILE).floor() as i32 - 1;
-     let end_tx = ((origin_x_px + viewport_size.x) / TILE).ceil() as i32 + 1;
-     let end_ty = ((origin_y_px + viewport_size.y) / TILE).ceil() as i32 + 6;
- 
-     let tile_screen = |tx: i32, ty: i32| -> Vec2 {
-         vec2(
-             viewport_origin.x + tx as f32 * TILE - origin_x_px,
-             viewport_origin.y + ty as f32 * TILE - origin_y_px,
-         )
-     };
- 
-     // Pass 1: terrain. Each byte (0-15) in BIGislandFULL.byt is a direct
-     // index into BS1's 16 tile sprites. Each sprite is 16×16 px = our
-     // TILE size, so we blit them 1:1 without scaling.
-     for ty in start_ty..end_ty {
-         for tx in start_tx..end_tx {
-             let Some(i) = World::index(tx, ty) else {
-                 // Out of bounds — fill with dark blue ocean.
-                 let p = tile_screen(tx, ty);
-                 draw_rectangle(p.x, p.y, TILE, TILE, Color::from_rgba(10, 30, 80, 255));
-                 continue;
-             };
-             let id = world.full[i] as u32;
-             let p = tile_screen(tx, ty);
-             // BS1 sprites have anchor (0, 0) — top-left positioning, no offset.
-             atlas.draw(SpriteId::new(1, id), p.x, p.y);
-         }
-     }
+) {
+    let cam_x_px = camera_world.x * TILE;
+    let cam_y_px = camera_world.y * TILE;
+    let origin_x_px = cam_x_px - viewport_size.x * 0.5;
+    let origin_y_px = cam_y_px - viewport_size.y * 0.5;
+
+    let start_tx = (origin_x_px / TILE).floor() as i32 - 1;
+    let start_ty = (origin_y_px / TILE).floor() as i32 - 1;
+    let end_tx = ((origin_x_px + viewport_size.x) / TILE).ceil() as i32 + 1;
+    let end_ty = ((origin_y_px + viewport_size.y) / TILE).ceil() as i32 + 6;
+
+    let tile_screen = |tx: i32, ty: i32| -> Vec2 {
+        vec2(
+            viewport_origin.x + tx as f32 * TILE - origin_x_px,
+            viewport_origin.y + ty as f32 * TILE - origin_y_px,
+        )
+    };
+
+    // Pass 1: terrain. Each byte (0-15) in BIGislandFULL.byt is a direct
+    // index into BS1's 16 tile sprites. Each sprite is 16×16 px = our
+    // TILE size, so we blit them 1:1 without scaling.
+    for ty in start_ty..end_ty {
+        for tx in start_tx..end_tx {
+            let Some(i) = World::index(tx, ty) else {
+                // Out of bounds — fill with dark blue ocean.
+                let p = tile_screen(tx, ty);
+                draw_rectangle(p.x, p.y, TILE, TILE, Color::from_rgba(10, 30, 80, 255));
+                continue;
+            };
+            let id = world.full[i] as u32;
+            let p = tile_screen(tx, ty);
+            // BS1 sprites have anchor (0, 0) — top-left positioning, no offset.
+            atlas.draw(SpriteId::new(1, id), p.x, p.y);
+        }
+    }
 
     // Pass 1.5: borders — rendered using BORDERS_PALETTE.
     for ty in start_ty..end_ty {
         for tx in start_tx..end_tx {
-            let Some(i) = World::index(tx, ty) else { continue };
+            let Some(i) = World::index(tx, ty) else {
+                continue;
+            };
             let bid = world.borders[i] as usize;
             if bid == 0 || bid > BORDERS_PALETTE.len() {
                 continue;
@@ -576,15 +700,37 @@ pub fn draw(
                 let sheet = (val >> 16) as u32;
                 let sprite = (val & 0xFFFF) as u32;
                 let p = tile_screen(tx, ty);
-                atlas.draw(SpriteId::new(sheet, sprite), p.x + TILE * 0.5, p.y + TILE * 0.5);
+                atlas.draw(
+                    SpriteId::new(sheet, sprite),
+                    p.x + TILE * 0.5,
+                    p.y + TILE * 0.5,
+                );
             }
         }
     }
- 
-    // Pass 2: decor — rendered using DECOR_PALETTE and composite trees logic.
+
+    // Pass 2: rocks — drawn from BS4 with sprite index rid - 1 if rid in 1..=48.
+    // Rocks must be under decor so trees are never hidden by rock-layer sprites
+    // on the same tile.
     for ty in start_ty..end_ty {
         for tx in start_tx..end_tx {
-            let Some(i) = World::index(tx, ty) else { continue };
+            let Some(i) = World::index(tx, ty) else {
+                continue;
+            };
+            let rid = world.rocks[i];
+            if (1..=48).contains(&rid) {
+                let p = tile_screen(tx, ty);
+                atlas.draw(SpriteId::new(4, rid as u32 - 1), p.x, p.y);
+            }
+        }
+    }
+
+    // Pass 3: decor — rendered using DECOR_PALETTE and composite trees logic.
+    for ty in start_ty..end_ty {
+        for tx in start_tx..end_tx {
+            let Some(i) = World::index(tx, ty) else {
+                continue;
+            };
             let did = world.decor[i] as usize;
             if did == 0 || did >= DECOR_PALETTE.len() {
                 continue;
@@ -601,7 +747,11 @@ pub fn draw(
                 if val > 0 {
                     let sheet = (val >> 16) as u32;
                     let sprite = (val & 0xFFFF) as u32;
-                    atlas.draw(SpriteId::new(sheet, sprite), p.x + TILE * 0.5, p.y + TILE * 0.5);
+                    atlas.draw(
+                        SpriteId::new(sheet, sprite),
+                        p.x + TILE * 0.5,
+                        p.y + TILE * 0.5,
+                    );
                 }
 
                 // 3. Draw stacked foliage/trunk segments
@@ -623,20 +773,12 @@ pub fn draw(
                 if val > 0 {
                     let sheet = (val >> 16) as u32;
                     let sprite = (val & 0xFFFF) as u32;
-                    atlas.draw(SpriteId::new(sheet, sprite), p.x + TILE * 0.5, p.y + TILE * 0.5);
+                    atlas.draw(
+                        SpriteId::new(sheet, sprite),
+                        p.x + TILE * 0.5,
+                        p.y + TILE * 0.5,
+                    );
                 }
-            }
-        }
-    }
-
-    // Pass 3: rocks — drawn from BS4 with sprite index rid - 1 if rid in 1..50.
-    for ty in start_ty..end_ty {
-        for tx in start_tx..end_tx {
-            let Some(i) = World::index(tx, ty) else { continue };
-            let rid = world.rocks[i];
-            if rid > 0 && rid < 50 {
-                let p = tile_screen(tx, ty);
-                atlas.draw(SpriteId::new(4, rid as u32 - 1), p.x, p.y);
             }
         }
     }
@@ -657,7 +799,11 @@ pub fn draw(
                 let sheet = (val >> 16) as u32;
                 let sprite = (val & 0xFFFF) as u32;
                 let p = tile_screen(tx, ty);
-                atlas.draw(SpriteId::new(sheet, sprite), p.x + TILE * 0.5, p.y + TILE * 0.5);
+                atlas.draw(
+                    SpriteId::new(sheet, sprite),
+                    p.x + TILE * 0.5,
+                    p.y + TILE * 0.5,
+                );
             }
         }
     }
@@ -690,37 +836,35 @@ pub fn draw_npcs(
         if npc.pos.x < left || npc.pos.x > right || npc.pos.y < top || npc.pos.y > bottom {
             continue;
         }
-        let Some(sprite_idx) = animal_sprite_id(npc.byte_id) else { continue };
+        let Some(sprite_idx) = animal_sprite_id(npc.byte_id) else {
+            continue;
+        };
         let sx = viewport_origin.x + npc.pos.x * TILE - origin_x_px;
         let sy = viewport_origin.y + npc.pos.y * TILE - origin_y_px;
         atlas.draw(SpriteId::new(2, sprite_idx), sx, sy);
     }
 }
 
-/// Map an animal byte ID (5, 42-50, 52-56, 62-64) to a sprite in BS2.
-/// Extracted from the switch in `data/g.java::e()` (case statements).
-/// Cases 46, 55, 62 weren't in the switch — we use neighboring sprites.
+/// Map an animal byte ID to a sprite in BS2.
+/// Extracted from the switch in `Robinson_java/decompiled/world.java`.
 pub fn animal_sprite_id(byte_id: u8) -> Option<u32> {
     Some(match byte_id {
-        5  => 0,    // shark
-        42 => 40,   // deer / wild animal
-        43 => 14,   // small reptile
-        44 => 86,   // colorful birds
-        45 => 10,   // wolf?
-        46 => 12,   // not in switch — use neighbor
-        47 => 18,   // crab
-        48 => 6,    // turtle
-        49 => 52,   // duck
-        50 => 46,   // brown bird
-        52 => 102,  // monkey / large bird
-        53 => 70,   // duck on water
-        54 => 78,   // turkey / large bird
-        55 => 80,   // not in switch — use neighbor
-        56 => 42,   // frog
-        62 => 116,  // not in switch — use neighbor
-        63 => 118,  // red parrot
-        64 => 110,  // toucan / colorful bird
+        5 => 0,    // wild goat
+        42 => 40,  // crab
+        43 => 14,  // small reptile
+        44 => 86,  // colorful birds
+        45 => 10,  // peccary
+        47 => 18,  // porcupine
+        48 => 6,   // turtle
+        49 => 52,  // green snake
+        50 => 46,  // boa
+        52 => 102, // green parrot
+        53 => 70,  // seagull
+        54 => 78,  // pelican
+        56 => 90,  // shark
+        62 => 42,  // green iguana
+        63 => 118, // toucan
+        64 => 110, // red ibis
         _ => return None,
     })
 }
-

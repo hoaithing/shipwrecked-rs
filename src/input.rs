@@ -15,9 +15,12 @@ pub enum Action {
     RightSoft,
     /// Numpad / quick slot 1..=9
     Slot(u8),
+    Sleep,
+    Inventory,
+    CraftMenu,
 }
 
-#[derive(Default, Debug)]
+#[derive(Debug, Default)]
 pub struct ActionState {
     /// Held this frame.
     pub held: Vec<Action>,
@@ -59,6 +62,15 @@ pub fn poll() -> ActionState {
     }
     if is_key_pressed(KeyCode::E) {
         s.pressed.push(Action::RightSoft);
+    }
+    if is_key_pressed(KeyCode::Z) {
+        s.pressed.push(Action::Sleep);
+    }
+    if is_key_pressed(KeyCode::I) {
+        s.pressed.push(Action::Inventory);
+    }
+    if is_key_pressed(KeyCode::C) {
+        s.pressed.push(Action::CraftMenu);
     }
     for (k, n) in [
         (KeyCode::Key1, 1),

@@ -26,8 +26,8 @@ pub struct DayNight {
 impl DayNight {
     pub fn new() -> Self {
         Self {
-            time_s: 0.30 * 240.0, // start in mid-morning
-            cycle_seconds: 240.0,
+            time_s: 0.30 * 360.0, // start in mid-morning
+            cycle_seconds: 360.0,
             day_count: 1,
         }
     }
@@ -46,13 +46,14 @@ impl DayNight {
     }
 
     /// Human-readable label for the HUD.
+    #[allow(dead_code)]
     pub fn label(&self) -> &'static str {
         let p = self.phase();
         match p {
             x if x < 0.20 => "Dawn",
             x if x < 0.70 => "Day",
             x if x < 0.85 => "Dusk",
-            _             => "Night",
+            _ => "Night",
         }
     }
 
@@ -72,11 +73,11 @@ impl DayNight {
         };
 
         // Color stops (R, G, B, A). Alpha is the overlay strength.
-        let dawn      = (1.0, 0.55, 0.30, 0.30);
-        let day       = (1.0, 1.00, 1.00, 0.00);
-        let dusk      = (1.0, 0.45, 0.20, 0.35);
-        let night     = (0.10, 0.15, 0.45, 0.60);
-        let predawn   = (0.10, 0.15, 0.45, 0.50);
+        let dawn = (1.0, 0.55, 0.30, 0.30);
+        let day = (1.0, 1.00, 1.00, 0.00);
+        let dusk = (1.0, 0.45, 0.20, 0.35);
+        let night = (0.10, 0.15, 0.45, 0.60);
+        let predawn = (0.10, 0.15, 0.45, 0.50);
 
         // Five segments stitched with linear interp:
         //   0.00 → 0.10  predawn → dawn       (night fades to orange)
@@ -91,7 +92,7 @@ impl DayNight {
             x if x < 0.70 => Color::new(day.0, day.1, day.2, day.3),
             x if x < 0.80 => lerp(day, dusk, (x - 0.70) / 0.10),
             x if x < 0.90 => lerp(dusk, night, (x - 0.80) / 0.10),
-            x             => lerp(night, predawn, (x - 0.90) / 0.10),
+            x => lerp(night, predawn, (x - 0.90) / 0.10),
         }
     }
 }

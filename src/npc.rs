@@ -48,11 +48,11 @@ impl Npc {
         // so they feel lively — the original game's animals moved quickly
         // too. Birds dart, sharks chase, turtles still amble.
         let speed = match byte_id {
-            48        => 1.5,           // turtle — slow but visible
-            5         => 5.0,           // shark — fast in water
-            44 | 64   => 5.0,           // birds — fast
-            42 | 50   => 4.0,           // deer / large birds
-            _         => 3.0,           // default wandering speed
+            48 => 1.5,                     // turtle — slow but visible
+            56 => 5.0,                     // shark — fast in water
+            44 | 52..=54 | 63 | 64 => 5.0, // birds — fast
+            5 | 42 | 50 => 4.0,            // goat / crab / large animals
+            _ => 3.0,                      // default wandering speed
         };
 
         Self {
@@ -120,9 +120,17 @@ impl Npc {
 
     fn update_facing(&mut self) {
         if self.vel.x.abs() > self.vel.y.abs() {
-            self.facing = if self.vel.x > 0.0 { Facing::East } else { Facing::West };
+            self.facing = if self.vel.x > 0.0 {
+                Facing::East
+            } else {
+                Facing::West
+            };
         } else if self.vel.y != 0.0 {
-            self.facing = if self.vel.y > 0.0 { Facing::South } else { Facing::North };
+            self.facing = if self.vel.y > 0.0 {
+                Facing::South
+            } else {
+                Facing::North
+            };
         }
     }
 }
@@ -139,7 +147,7 @@ fn can_walk_for(byte_id: u8, world: &World, x: f32, y: f32) -> bool {
         t,
         Terrain::ShallowWater | Terrain::DeepWater | Terrain::LilyWater
     );
-    let is_water_animal = matches!(byte_id, 5 | 49 | 53); // shark, duck, water bird
+    let is_water_animal = matches!(byte_id, 53 | 56); // water bird, shark
     if is_water_animal {
         // Water animals only walk in water (no terrain rendering on land).
         is_water
@@ -156,7 +164,7 @@ pub fn spawn_animals(world: &mut World) -> Vec<Npc> {
     let mut npcs = Vec::new();
     for i in 0..world.objects.len() {
         let b = world.objects[i];
-        if World::is_animal_id(b) {
+        if World::is_mobile_animal_id(b) {
             let x = (i % crate::world::MAP_W) as i32;
             let y = (i / crate::world::MAP_W) as i32;
             npcs.push(Npc::new(b, x, y));
